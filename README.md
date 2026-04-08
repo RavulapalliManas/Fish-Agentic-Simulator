@@ -1,6 +1,15 @@
-# Fish Swarm Simulator
+# Fish Stimulus Generator
 
-A modular fish-school simulator with multiple motion models, timing-based splitting, rotational dynamics, and a PyQt5 interface designed to stay approachable for psychology students.
+This project is now a deterministic, research-grade stimulus generator for fish behavioral experiments, with the splitting paradigm as the primary target use case.
+
+## What It Does
+
+- Generates `.mp4` videos as the primary output
+- Uses a fixed timestep with `dt = 1 / fps`
+- Runs fully offscreen during export
+- Separates physics, paradigms, rendering, and UI
+- Exposes simulation, paradigm, rendering, appearance, and output controls in a PyQt5 interface
+- Saves a reproducibility sidecar JSON with each export by default
 
 ## Install
 
@@ -8,26 +17,49 @@ A modular fish-school simulator with multiple motion models, timing-based splitt
 python3 -m pip install -r requirements.txt
 ```
 
-## Run
+## Launch the UI
 
 ```bash
 python3 src/main.py
 ```
 
-## Default Demo
+## Headless Export
 
-On launch the simulation is stopped.
+```bash
+python3 src/main.py --headless --output output/stimulus.mp4
+```
 
-Default behavior:
+Optional CLI overrides:
 
-- `time_in_center = 5s`
-- `time_to_split = 10s`
-- `split_ratio = 0.7`
-- `rotation_strength = 0.48`
-- `shape = triangle`
+```bash
+python3 src/main.py --headless \
+  --output output/stimulus.mp4 \
+  --duration 10 \
+  --fps 60 \
+  --width 1280 \
+  --height 720 \
+  --seed 2024 \
+  --agents 48 \
+  --model "Hybrid Consensus" \
+  --split-ratio 0.7
+```
 
-The default sequence is:
+You can also reuse an exported metadata sidecar for exact reproduction:
 
-1. Gather at the center
-2. Orbit during stabilization
-3. Split into left and right subgroups
+```bash
+python3 src/main.py --headless --config-json output/stimulus.json --output output/replay.mp4
+```
+
+## Default Fish-Training Profile
+
+The default configuration is tuned for clear T-maze-style splitting:
+
+- duration: `10s`
+- fps: `60`
+- resolution: `1280x720`
+- split ratio: `0.7`
+- strong attractors
+- moderate rotation
+- tight central aggregation
+- stable pause
+- clean left/right split
