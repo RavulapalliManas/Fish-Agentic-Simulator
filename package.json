@@ -3,10 +3,13 @@
   "private": true,
   "version": "1.0.0",
   "scripts": {
+    "backend:dev": "python3 backend/main.py --host 127.0.0.1 --port 8765",
+    "backend:build": "python3 backend/build_backend.py",
     "frontend:dev": "npm --prefix frontend run dev",
     "frontend:build": "npm --prefix frontend run build",
     "tauri:dev": "tauri dev",
-    "tauri:build": "python3 backend/build_backend.py && tauri build"
+    "tauri:build": "python3 scripts/build_desktop_release.py",
+    "release:desktop": "python3 scripts/build_desktop_release.py"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.0.0"

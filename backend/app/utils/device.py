@@ -48,3 +48,10 @@ def recommend_export_settings(profile: DeviceProfile) -> dict[str, int]:
         height = min(height, int(profile.screen_height))
 
     return {"output_width": width, "output_height": height, "fps": fps, "number_of_agents": agents}
+
+
+def recommend_parallel_jobs(profile: DeviceProfile) -> int:
+    """Suggest a safe amount of parallelism for batch sweeps on this device."""
+    cpu_limited = max(1, profile.cpu_cores // 2)
+    ram_limited = max(1, int(profile.ram_gb // 6.0))
+    return max(1, min(4, cpu_limited, ram_limited))

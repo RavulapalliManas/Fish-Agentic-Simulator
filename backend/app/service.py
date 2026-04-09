@@ -9,10 +9,20 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
-from api_models import OptimizeResponse, SimulateRequest, SimulateResponse, StatusResponse
+from api_models import (
+    OptimizeResponse,
+    PreviewAgent,
+    PreviewPoint,
+    PreviewRequest,
+    PreviewResponse,
+    SimulateRequest,
+    SimulateResponse,
+    StatusResponse,
+)
 from job_manager import JobManager
+from simulation import sample_preview_state
 from utils.config import StimulusConfig
-from utils.device import detect_device_profile, recommend_export_settings
+from utils.device import detect_device_profile, recommend_export_settings, recommend_parallel_jobs
 
 
 def create_app() -> FastAPI:
@@ -42,12 +52,13 @@ def create_app() -> FastAPI:
         return OptimizeResponse(
             cpu_cores=profile.cpu_cores,
             ram_gb=round(profile.ram_gb, 1),
+            recommended_parallel_jobs=recommend_parallel_jobs(profile),
             **recommendation,
         )
 
     @app.post("/simulate", response_model=SimulateResponse)
     def simulate(payload: SimulateRequest) -> SimulateResponse:
-        config = _make_config(payload.config)
+        config = _validated_config(payload.config)
         output_path = _resolve_output_path(payload.output_path)
         record = manager.submit(config, output_path)
         return SimulateResponse(
@@ -56,6 +67,30 @@ def create_app() -> FastAPI:
             output_path=record.output_path,
             status_url=f"/status?job_id={record.job_id}",
             video_url=f"/jobs/{record.job_id}/video",
+        )
+
+    @app.post("/preview", response_model=PreviewResponse)
+    def preview(payload: PreviewRequest) -> PreviewResponse:
+        config = _validated_config(payload.config)
+        frame_state = sample_preview_state(config, payload.phase)
+        return PreviewResponse(
+            phase=frame_state.phase,
+            width=config.output_width,
+            height=config.output_height,
+            attractors={
+                name: PreviewPoint(x=float(value[0]), y=float(value[1]))
+                for name, value in frame_state.attractors.items()
+            },
+            agents=[
+                PreviewAgent(
+                    x=float(agent.position[0]),
+                    y=float(agent.position[1]),
+                    heading=float(agent.heading),
+                    group=agent.group,
+                )
+                for agent in frame_state.agents
+            ],
+            metrics=frame_state.metrics,
         )
 
     @app.get("/status", response_model=StatusResponse)
@@ -87,6 +122,13 @@ def _make_config(raw: dict) -> StimulusConfig:
         if hasattr(config, key):
             setattr(config, key, value)
     return config.validate()
+
+
+def _validated_config(raw: dict) -> StimulusConfig:
+    try:
+        return _make_config(raw)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 def _resolve_output_path(output_path: str | None) -> str:

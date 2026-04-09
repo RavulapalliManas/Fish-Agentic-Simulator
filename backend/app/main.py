@@ -28,7 +28,8 @@ def _load_config_from_args(args) -> StimulusConfig:
         "random_seed": args.seed,
         "number_of_agents": args.agents,
         "model_type": args.model,
-        "split_ratio": args.split_ratio,
+        "left_count": args.left_count,
+        "right_count": args.right_count,
     }
     for key, value in overrides.items():
         if value is not None:
@@ -48,7 +49,8 @@ def main() -> None:
     parser.add_argument("--seed", type=int, help="Random seed")
     parser.add_argument("--agents", type=int, help="Number of agents")
     parser.add_argument("--model", help="Model type")
-    parser.add_argument("--split-ratio", type=float, help="Left-group ratio during split")
+    parser.add_argument("--left-count", type=int, help="Exact number of agents assigned to the left branch")
+    parser.add_argument("--right-count", type=int, help="Exact number of agents assigned to the right branch")
     args = parser.parse_args()
 
     if args.headless:

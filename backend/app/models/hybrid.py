@@ -16,6 +16,7 @@ class HybridConsensusModel(ResearchBoidsModel):
     def compute_force(self, agent, neighbors, context) -> np.ndarray:
         config = context["config"]
         multipliers = context["social_multipliers"]
+        target_speed = float(context["target_speed"])
         boids_force = super().compute_force(agent, neighbors, context)
 
         if neighbors:
@@ -24,5 +25,5 @@ class HybridConsensusModel(ResearchBoidsModel):
         else:
             consensus = agent.direction
 
-        consensus_force = consensus * float(config.speed) - agent.velocity
+        consensus_force = consensus * target_speed - agent.velocity
         return boids_force * 0.78 + consensus_force * config.alignment * 0.42 * multipliers["alignment"]

@@ -47,3 +47,38 @@ class OptimizeResponse(BaseModel):
     output_height: int
     cpu_cores: int
     ram_gb: float
+    recommended_parallel_jobs: int
+
+
+class PreviewRequest(BaseModel):
+    """Request body for deterministic layout/simulation previews."""
+
+    config: dict[str, Any] = Field(default_factory=dict)
+    phase: str = "split"
+
+
+class PreviewPoint(BaseModel):
+    """Simple 2D coordinate."""
+
+    x: float
+    y: float
+
+
+class PreviewAgent(BaseModel):
+    """Render-ready preview agent."""
+
+    x: float
+    y: float
+    heading: float
+    group: str
+
+
+class PreviewResponse(BaseModel):
+    """Deterministic preview snapshot sampled from the simulation engine."""
+
+    phase: str
+    width: int
+    height: int
+    attractors: dict[str, PreviewPoint]
+    agents: list[PreviewAgent]
+    metrics: dict[str, Any]

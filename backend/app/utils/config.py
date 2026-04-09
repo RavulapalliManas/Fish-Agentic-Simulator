@@ -35,17 +35,19 @@ class StimulusConfig:
 
     number_of_agents: int = 48
     model_type: str = "Hybrid Consensus"
-    noise: float = 0.18
-    speed: float = 145.0
-    cohesion: float = 1.30
-    alignment: float = 1.05
-    separation: float = 1.65
+    noise: float = 0.14
+    speed: float = 132.0
+    cohesion: float = 1.55
+    alignment: float = 1.28
+    separation: float = 1.18
 
-    split_ratio: float = 0.70
+    left_count: int | None = None
+    right_count: int | None = None
     time_in_center: float = 2.8
     time_to_split: float = 5.0
-    attractor_strength: float = 180.0
-    rotation_strength: float = 72.0
+    attractor_strength: float = 210.0
+    rotation_strength: float = 18.0
+    target_cluster_radius: float = 78.0
     center_attractor_x: float | None = None
     center_attractor_y: float | None = None
     left_attractor_x: float | None = None
@@ -66,14 +68,14 @@ class StimulusConfig:
     landmark_right_x: float | None = None
     landmark_right_y: float | None = None
 
-    initial_spread: float = 28.0
-    neighbor_radius: float = 118.0
-    separation_radius: float = 34.0
-    max_force: float = 260.0
+    initial_spread: float = 22.0
+    neighbor_radius: float = 88.0
+    separation_radius: float = 24.0
+    max_force: float = 240.0
     max_turn_rate_deg: float = 320.0
     wall_margin: float = 52.0
-    wall_strength: float = 220.0
-    phase_smoothing_time: float = 0.42
+    wall_strength: float = 200.0
+    phase_smoothing_time: float = 0.28
     save_metadata_json: bool = True
 
     def __post_init__(self) -> None:
@@ -163,13 +165,19 @@ class StimulusConfig:
         self.alignment = max(0.0, float(self.alignment))
         self.separation = max(0.0, float(self.separation))
 
-        self.split_ratio = clamp(float(self.split_ratio), 0.0, 1.0)
+        self.left_count, self.right_count = self._normalize_split_counts()
         self.time_in_center = max(0.0, float(self.time_in_center))
         self.time_to_split = max(self.time_in_center + self.dt, float(self.time_to_split))
         self.attractor_strength = max(0.0, float(self.attractor_strength))
         self.rotation_strength = max(0.0, float(self.rotation_strength))
 
         self.size = max(2.0, float(self.size))
+        self.target_cluster_radius = clamp(
+            float(self.target_cluster_radius),
+            max(self.size * 3.0, 24.0),
+            min(float(self.output_width), float(self.output_height)) * 0.48,
+        )
+
         self.shape = self.shape if self.shape in SHAPE_OPTIONS else "triangle"
         self.model_type = self.model_type if self.model_type in MODEL_OPTIONS else MODEL_OPTIONS[-1]
 
@@ -186,6 +194,31 @@ class StimulusConfig:
 
         self.apply_layout_defaults()
         return self
+
+    def _normalize_split_counts(self) -> tuple[int, int]:
+        if self.left_count is None and self.right_count is None:
+            left_count = int(self.number_of_agents // 2)
+            return left_count, int(self.number_of_agents - left_count)
+
+        if self.left_count is None:
+            right_count = int(self.right_count)
+            if right_count < 0 or right_count > self.number_of_agents:
+                raise ValueError("right_count must stay within the total number of agents")
+            return int(self.number_of_agents - right_count), right_count
+
+        if self.right_count is None:
+            left_count = int(self.left_count)
+            if left_count < 0 or left_count > self.number_of_agents:
+                raise ValueError("left_count must stay within the total number of agents")
+            return left_count, int(self.number_of_agents - left_count)
+
+        left_count = int(self.left_count)
+        right_count = int(self.right_count)
+        if left_count < 0 or right_count < 0:
+            raise ValueError("left_count and right_count must be non-negative")
+        if left_count + right_count != self.number_of_agents:
+            raise ValueError("left_count + right_count must equal number_of_agents")
+        return left_count, right_count
 
     def to_dict(self) -> dict:
         self.validate()

@@ -37,7 +37,15 @@ class FishAgent:
         self.noise_direction = normalize(blended, fallback=self.noise_direction)
         return self.noise_direction.copy()
 
-    def integrate(self, total_force: np.ndarray, dt: float, config, constant_speed: bool = False) -> None:
+    def integrate(
+        self,
+        total_force: np.ndarray,
+        dt: float,
+        config,
+        constant_speed: bool = False,
+        target_speed: float | None = None,
+        min_speed: float = 0.0,
+    ) -> None:
         """Advance the fish by one fixed-timestep update."""
         acceleration = limit_magnitude(np.asarray(total_force, dtype=float), config.max_force)
         current_direction = self.direction
@@ -49,12 +57,15 @@ class FishAgent:
             max_turn_radians=np.deg2rad(config.max_turn_rate_deg) * float(dt),
         )
 
+        requested_speed = float(config.speed if target_speed is None else max(0.0, target_speed))
+        minimum_speed = max(0.0, float(min_speed))
         if constant_speed:
-            new_speed = float(config.speed)
+            new_speed = max(requested_speed, minimum_speed)
         else:
-            predicted_speed = max(float(np.linalg.norm(predicted_velocity)), float(config.speed) * 0.25)
+            predicted_speed = max(float(np.linalg.norm(predicted_velocity)), minimum_speed)
             speed_blend = min(1.0, 4.0 * float(dt))
-            new_speed = predicted_speed + (float(config.speed) - predicted_speed) * speed_blend
+            blended_speed = predicted_speed + (requested_speed - predicted_speed) * speed_blend
+            new_speed = max(minimum_speed, blended_speed)
 
         self.velocity = turn_limited_direction * new_speed
         self.position = self.position + self.velocity * float(dt)

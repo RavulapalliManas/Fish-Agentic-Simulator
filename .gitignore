@@ -7,9 +7,11 @@ frontend/vite.config.d.ts
 src-tauri/target/
 backend/build/
 backend/dist/
+backend/.pyinstaller-cache/
 backend/__pycache__/
 __pycache__/
 *.pyc
 fish-backend.spec
 fish/
+release/
 .DS_Store

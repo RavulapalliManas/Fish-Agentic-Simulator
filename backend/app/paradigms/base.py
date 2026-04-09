@@ -9,12 +9,23 @@ import numpy as np
 
 
 @dataclass
+class AgentMotionCommand:
+    """Per-agent locomotion command layered on top of the shared model force."""
+
+    target_speed: float
+    min_speed: float
+    noise_scale: float
+    damping: float
+
+
+@dataclass
 class ParadigmOutput:
     """Per-frame paradigm output consumed by the deterministic engine."""
 
     phase: str
     attractors: dict[str, np.ndarray]
     external_forces: list[np.ndarray]
+    motion_commands: list[AgentMotionCommand]
     social_multipliers: dict[str, float]
     neighbor_mode: str
 

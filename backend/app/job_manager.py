@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from renderer.video_exporter import VideoExporter
+from utils.device import detect_device_profile, recommend_parallel_jobs
 
 
 @dataclass
@@ -72,12 +73,14 @@ class JobRecord:
 
 
 class JobManager:
-    """Serialize headless export work so the API stays responsive."""
+    """Manage headless export jobs while allowing safe local parallelism."""
 
     def __init__(self) -> None:
         self._jobs: dict[str, JobRecord] = {}
         self._jobs_lock = threading.Lock()
-        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="stimulus-export")
+        profile = detect_device_profile()
+        self._max_workers = recommend_parallel_jobs(profile)
+        self._executor = ThreadPoolExecutor(max_workers=self._max_workers, thread_name_prefix="stimulus-export")
 
     def submit(self, config, output_path: str) -> JobRecord:
         job_id = uuid.uuid4().hex

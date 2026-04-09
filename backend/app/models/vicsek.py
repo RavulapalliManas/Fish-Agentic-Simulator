@@ -17,6 +17,7 @@ class VicsekConsensusModel(BaseModel):
     def compute_force(self, agent, neighbors, context) -> np.ndarray:
         config = context["config"]
         multipliers = context["social_multipliers"]
+        target_speed = float(context["target_speed"])
         current_direction = agent.direction
 
         if neighbors:
@@ -28,7 +29,7 @@ class VicsekConsensusModel(BaseModel):
         cohesion = np.zeros(2, dtype=float)
         if neighbors:
             centroid = np.mean(np.asarray([neighbor.position for neighbor in neighbors], dtype=float), axis=0)
-            cohesion = normalize(centroid - agent.position, fallback=current_direction) * float(config.speed) - agent.velocity
+            cohesion = normalize(centroid - agent.position, fallback=current_direction) * target_speed - agent.velocity
 
         separation = np.zeros(2, dtype=float)
         for neighbor in neighbors:
@@ -37,9 +38,9 @@ class VicsekConsensusModel(BaseModel):
             if 0.0 < distance < config.separation_radius:
                 separation += offset / max(distance ** 2, 1.0)
 
-        consensus_force = consensus_direction * float(config.speed) - agent.velocity
+        consensus_force = consensus_direction * target_speed - agent.velocity
         if np.linalg.norm(separation) > 1e-8:
-            separation = normalize(separation, fallback=current_direction) * float(config.speed) - agent.velocity
+            separation = normalize(separation, fallback=current_direction) * target_speed - agent.velocity
 
         return (
             consensus_force * config.alignment * multipliers["alignment"]

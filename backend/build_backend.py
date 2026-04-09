@@ -35,6 +35,8 @@ def main() -> None:
         "fish-backend",
         "--paths",
         str(backend_dir / "app"),
+        "--specpath",
+        str(cache_dir),
         "--distpath",
         str(dist_dir),
         "--workpath",

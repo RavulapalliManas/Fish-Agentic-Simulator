@@ -52,8 +52,6 @@ class StimulusEngine:
             "right": self.config.right_attractor,
         }
         self.metrics: dict[str, float | int | str] = {}
-        self._current_neighbor_mode = "all"
-        self._current_social_multipliers = {"cohesion": 1.0, "alignment": 1.0, "separation": 1.0}
         self.reset()
 
     def reset(self) -> None:
@@ -71,8 +69,6 @@ class StimulusEngine:
             "left": self.config.left_attractor,
             "right": self.config.right_attractor,
         }
-        self._current_neighbor_mode = "all"
-        self._current_social_multipliers = {"cohesion": 1.35, "alignment": 1.10, "separation": 0.82}
         self._update_metrics()
 
     def step(self) -> None:
@@ -86,22 +82,39 @@ class StimulusEngine:
         )
 
         neighbor_map = self._compute_neighbors(paradigm_output.neighbor_mode)
-        for agent, neighbors in zip(self.agents, neighbor_map):
-            noise_force = agent.sample_noise(self.config.dt, self.rng) * float(self.config.noise) * float(self.config.max_force)
+        for agent, neighbors, motion_command, external_force in zip(
+            self.agents,
+            neighbor_map,
+            paradigm_output.motion_commands,
+            paradigm_output.external_forces,
+        ):
+            noise_force = (
+                agent.sample_noise(self.config.dt, self.rng)
+                * float(self.config.noise)
+                * float(motion_command.noise_scale)
+                * float(self.config.max_force)
+            )
             context = {
                 "config": self.config,
                 "dt": self.config.dt,
                 "noise_force": noise_force,
+                "target_speed": motion_command.target_speed,
                 "social_multipliers": paradigm_output.social_multipliers,
             }
             model_force = self.model.compute_force(agent, neighbors, context)
-            total_force = model_force + paradigm_output.external_forces[agent.id] + self._wall_force(agent)
-            agent.integrate(total_force, self.config.dt, self.config, constant_speed=self.model.constant_speed)
+            damping_force = -agent.velocity * float(motion_command.damping)
+            total_force = model_force + external_force + damping_force + self._wall_force(agent)
+            agent.integrate(
+                total_force,
+                self.config.dt,
+                self.config,
+                constant_speed=self.model.constant_speed,
+                target_speed=motion_command.target_speed,
+                min_speed=motion_command.min_speed,
+            )
 
         self.phase = paradigm_output.phase
         self.attractors = paradigm_output.attractors
-        self._current_neighbor_mode = paradigm_output.neighbor_mode
-        self._current_social_multipliers = paradigm_output.social_multipliers
         self.time_seconds = evaluation_time
         self.frame_index = next_frame_index
         self._update_metrics()
@@ -134,6 +147,17 @@ class StimulusEngine:
             dtype=float,
         )
         return [FishAgent(index, positions[index], velocities[index]) for index in range(self.config.number_of_agents)]
+
+    def run_until_time(self, target_time_seconds: float) -> FrameState:
+        """Advance until the requested preview/export time and return the current frame."""
+        target_time = max(0.0, float(target_time_seconds))
+        target_frame = min(
+            self.config.total_frames - 1,
+            max(0, int(round(target_time * float(self.config.fps)))),
+        )
+        while self.frame_index < target_frame:
+            self.step()
+        return self.current_frame()
 
     def _compute_neighbors(self, neighbor_mode: str) -> list[list[FishAgent]]:
         radius = float(self.config.neighbor_radius)
@@ -209,3 +233,22 @@ class StimulusEngine:
             "left_count": sum(1 for agent in self.agents if agent.group == "left"),
             "right_count": sum(1 for agent in self.agents if agent.group == "right"),
         }
+
+
+def sample_preview_state(config: StimulusConfig, phase: str) -> FrameState:
+    """Return a deterministic preview snapshot from the real simulation engine."""
+    normalized_phase = phase if phase in {"center", "stabilize", "split"} else "split"
+    engine = StimulusEngine(config)
+    return engine.run_until_time(_preview_time_for_phase(engine.config, normalized_phase))
+
+
+def _preview_time_for_phase(config: StimulusConfig, phase: str) -> float:
+    if phase == "center":
+        return max(config.dt, config.time_in_center * 0.55)
+
+    if phase == "stabilize":
+        stabilize_window = max(config.time_to_split - config.time_in_center, config.dt)
+        return min(config.video_duration - config.dt, config.time_in_center + stabilize_window * 0.55)
+
+    split_window = max(config.video_duration - config.time_to_split, config.dt)
+    return min(config.video_duration - config.dt, config.time_to_split + min(1.6, split_window * 0.72))

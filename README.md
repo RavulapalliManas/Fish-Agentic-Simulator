@@ -23,6 +23,8 @@ root/
 - Starts with a single desktop click
 - Launches a bundled Python backend automatically
 - Generates headless MP4 stimuli from a clean React interface
+- Uses exact left/right split counts instead of probabilistic ratios
+- Samples deterministic preview frames for aggregation, stabilization, and split layout design
 - Polls progress without freezing the UI
 - Streams the finished video back into the app for preview
 
@@ -35,6 +37,9 @@ root/
   - returns progress, phase, ETA, output path, and error state
 - `GET /optimize`
   - recommends `number_of_agents`, `fps`, and `resolution`
+- `POST /preview`
+  - samples a deterministic preview frame for `center`, `stabilize`, or `split`
+  - accepts the same `config` payload used for rendering
 - `GET /health`
   - readiness probe for the desktop shell
 - `GET /jobs/{job_id}/video`
@@ -68,19 +73,67 @@ The Tauri shell will:
 - pass the base URL to the frontend
 - terminate the backend when the desktop app closes
 
-## Production Build
+## Browser-Only UI Preview
 
-1. Build the packaged backend:
-
-```bash
-python3 backend/build_backend.py
-```
-
-2. Build the desktop app bundle:
+If you want to inspect the React UI in a browser instead of the Tauri shell, run the backend and frontend separately:
 
 ```bash
-npm run tauri:build
+npm run backend:dev
 ```
+
+In a second terminal:
+
+```bash
+npm run frontend:dev
+```
+
+The app will detect browser mode automatically and connect to `http://127.0.0.1:8765`.
+
+## Native Installers
+
+Create the native installer bundle for the current operating system with one command:
+
+```bash
+npm run release:desktop
+```
+
+Outputs by platform:
+
+- macOS: zipped `.app`
+- Windows: NSIS `.exe` installer
+- Linux: `.AppImage` plus `.deb`
+
+Each build also writes a `release-manifest.json` containing the artifact names and SHA-256 checksums.
+
+The release files are written to:
+
+```text
+release/
+```
+
+The script intentionally builds the macOS `.app` bundle directly and then zips it, which is more reliable in headless/local automation than DMG creation.
+
+## Cross-Platform CI Releases
+
+This repository now includes a GitHub Actions workflow at:
+
+```text
+.github/workflows/build-native-installers.yml
+```
+
+It builds separate native artifacts for:
+
+- macOS
+- Windows
+- Linux
+
+How to use it:
+
+1. Push a tag such as `v1.0.0`
+2. GitHub Actions builds all three platforms
+3. The workflow uploads the installers to the corresponding GitHub Release
+
+You can also run the workflow manually with `workflow_dispatch` to test the build matrix before cutting a release.
 
 ## Distribution Targets
 

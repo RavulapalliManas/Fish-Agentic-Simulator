@@ -1,4 +1,4 @@
-import type { AppConfig } from "./defaults";
+import type { AppConfig, PreviewPhase } from "./defaults";
 
 export type SimulateResponse = {
   job_id: string;
@@ -27,12 +27,41 @@ export type OptimizeResponse = {
   output_height: number;
   cpu_cores: number;
   ram_gb: number;
+  recommended_parallel_jobs: number;
+};
+
+export type PreviewPoint = {
+  x: number;
+  y: number;
+};
+
+export type PreviewAgent = {
+  x: number;
+  y: number;
+  heading: number;
+  group: string;
+};
+
+export type PreviewResponse = {
+  phase: string;
+  width: number;
+  height: number;
+  attractors: Record<string, PreviewPoint>;
+  agents: PreviewAgent[];
+  metrics: Record<string, string | number>;
 };
 
 async function parseJson<T>(response: Response): Promise<T> {
   if (!response.ok) {
-    const message = await response.text();
-    throw new Error(message || "Request failed");
+    const responseText = await response.text();
+    let detail: string | undefined;
+    try {
+      const payload = JSON.parse(responseText) as { detail?: string };
+      detail = payload.detail;
+    } catch {
+      detail = undefined;
+    }
+    throw new Error(detail || responseText || "Request failed");
   }
   return (await response.json()) as T;
 }
@@ -68,4 +97,20 @@ export async function fetchOptimization(
   }
   const suffix = params.size > 0 ? `?${params.toString()}` : "";
   return parseJson<OptimizeResponse>(await fetch(`${baseUrl}/optimize${suffix}`));
+}
+
+export async function fetchPreview(
+  baseUrl: string,
+  config: AppConfig,
+  phase: PreviewPhase,
+  signal?: AbortSignal,
+): Promise<PreviewResponse> {
+  return parseJson<PreviewResponse>(
+    await fetch(`${baseUrl}/preview`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ config, phase }),
+      signal,
+    }),
+  );
 }

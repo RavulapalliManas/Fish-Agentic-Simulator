@@ -4,17 +4,20 @@ export type RuntimeInfo = {
   baseUrl: string;
   defaultOutputPath: string;
   startupError?: string | null;
+  mode: "tauri" | "browser";
 };
 
 const FALLBACK_RUNTIME: RuntimeInfo = {
   baseUrl: import.meta.env.VITE_BACKEND_URL ?? "http://127.0.0.1:8765",
   defaultOutputPath: "output/stimulus.mp4",
   startupError: null,
+  mode: "browser",
 };
 
 export async function getRuntimeInfo(): Promise<RuntimeInfo> {
   try {
-    return await invoke<RuntimeInfo>("get_backend_info");
+    const info = await invoke<Omit<RuntimeInfo, "mode">>("get_backend_info");
+    return { ...info, mode: "tauri" };
   } catch {
     return FALLBACK_RUNTIME;
   }
