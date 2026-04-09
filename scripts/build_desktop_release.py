@@ -55,8 +55,6 @@ def detect_platform_key() -> str:
         return "macos"
     if sys.platform.startswith("win"):
         return "windows"
-    if sys.platform.startswith("linux"):
-        return "linux"
     raise RuntimeError(f"Unsupported release platform: {sys.platform}")
 
 
@@ -71,10 +69,6 @@ def build_tauri_app_bundle() -> None:
 
     if sys.platform.startswith("win"):
         run(["npx", "tauri", "build", "--bundles", "nsis"])
-        return
-
-    if sys.platform.startswith("linux"):
-        run(["npx", "tauri", "build", "--bundles", "appimage,deb"])
         return
 
     raise RuntimeError(f"Unsupported release platform: {sys.platform}")
@@ -116,13 +110,6 @@ def package_release_artifacts(product_name: str, version: str, platform_key: str
         bundle_dir = TAURI_BUNDLE_ROOT / "nsis"
         artifact = first_file(bundle_dir, "*.exe")
         return [copy_file_to_release(artifact, release_dir)]
-
-    if platform_key == "linux":
-        artifacts = [
-            copy_file_to_release(first_file(TAURI_BUNDLE_ROOT / "appimage", "*.AppImage"), release_dir),
-            copy_file_to_release(first_file(TAURI_BUNDLE_ROOT / "deb", "*.deb"), release_dir),
-        ]
-        return artifacts
 
     raise RuntimeError(f"Unsupported release platform: {platform_key}")
 

@@ -101,7 +101,6 @@ Outputs by platform:
 
 - macOS: zipped `.app`
 - Windows: NSIS `.exe` installer
-- Linux: `.AppImage` plus `.deb`
 
 Each build also writes a `release-manifest.json` containing the artifact names and SHA-256 checksums.
 
@@ -125,12 +124,11 @@ It builds separate native artifacts for:
 
 - macOS
 - Windows
-- Linux
 
 How to use it:
 
 1. Push a tag such as `v1.0.0`
-2. GitHub Actions builds all three platforms
+2. GitHub Actions builds both supported platforms
 3. The workflow uploads the installers to the corresponding GitHub Release
 
 You can also run the workflow manually with `workflow_dispatch` to test the build matrix before cutting a release.
@@ -141,7 +139,6 @@ Tauri is configured for:
 
 - Windows installer
 - macOS app bundle / disk image
-- Linux AppImage
 
 The backend is bundled as a PyInstaller-generated standalone executable, so end users do not need Python installed.
 
