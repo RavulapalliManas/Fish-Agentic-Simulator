@@ -1,0 +1,33 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color: #142130;
+  background:
+    radial-gradient(circle at top left, rgba(45, 125, 255, 0.08), transparent 28%),
+    linear-gradient(180deg, #f8fbff 0%, #f1f5fb 100%);
+}
+
+html,
+body,
+#root {
+  min-height: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: "SF Pro Display", "Helvetica Neue", "Segoe UI", sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+button,
+input,
+select {
+  font: inherit;
+}
+
+input[type="range"] {
+  accent-color: #2d7dff;
+}

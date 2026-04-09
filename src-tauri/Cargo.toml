@@ -1,0 +1,15 @@
+[package]
+name = "fish-stimulus-desktop"
+version = "1.0.0"
+description = "Lightweight fish stimulus generation desktop app"
+authors = ["OpenAI Codex"]
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+dirs = "6"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = { version = "2", features = [] }
