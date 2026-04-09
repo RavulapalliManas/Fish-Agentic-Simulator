@@ -159,8 +159,23 @@ def sha256_file(path: Path) -> str:
 
 
 def run(command: list[str], cwd: Path | None = None) -> None:
+    resolved_command = command.copy()
+    resolved_command[0] = resolve_command(command[0])
     print(f"+ {' '.join(command)}")
-    subprocess.run(command, check=True, cwd=str(cwd or ROOT))
+    subprocess.run(resolved_command, check=True, cwd=str(cwd or ROOT))
+
+
+def resolve_command(command_name: str) -> str:
+    if Path(command_name).name != command_name:
+        return command_name
+
+    if sys.platform.startswith("win") and command_name in {"npm", "npx"}:
+        command_name = f"{command_name}.cmd"
+
+    resolved = shutil.which(command_name)
+    if resolved is None:
+        raise FileNotFoundError(f"Unable to locate required command: {command_name}")
+    return resolved
 
 
 if __name__ == "__main__":
