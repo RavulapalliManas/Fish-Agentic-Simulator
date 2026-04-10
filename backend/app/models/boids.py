@@ -52,10 +52,11 @@ class ResearchBoidsModel(BaseModel):
         if not neighbors:
             return np.zeros(2, dtype=float)
         repel = np.zeros(2, dtype=float)
+        personal_space = max(float(config.separation_radius), float(config.minimum_agent_spacing))
         for neighbor in neighbors:
             offset = agent.position - neighbor.position
             distance = float(np.linalg.norm(offset))
-            if 0.0 < distance < config.separation_radius:
+            if 0.0 < distance < personal_space:
                 repel += offset / max(distance ** 2, 1.0)
         if np.linalg.norm(repel) < 1e-8:
             return np.zeros(2, dtype=float)

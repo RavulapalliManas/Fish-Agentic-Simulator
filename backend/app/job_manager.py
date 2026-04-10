@@ -8,7 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from renderer.video_exporter import VideoExporter
+from renderer.video_exporter import ExportControl, VideoExporter
 from utils.device import detect_device_profile, recommend_parallel_jobs
 
 
@@ -27,6 +27,7 @@ class JobRecord:
     video_url: str | None = None
     total_frames: int = 0
     completed_frames: int = 0
+    _control: ExportControl = field(default_factory=ExportControl, repr=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def snapshot(self) -> dict:
@@ -51,11 +52,13 @@ class JobRecord:
             self.eta_seconds = max(0.0, float(eta_seconds))
             self.phase = str(phase)
             self.status = "running"
+            self.error = None
 
     def mark_running(self) -> None:
         with self._lock:
             self.status = "running"
             self.progress = 0.0
+            self.error = None
 
     def mark_complete(self, metadata_path: str | None) -> None:
         with self._lock:
@@ -65,11 +68,48 @@ class JobRecord:
             self.metadata_path = metadata_path
             self.video_url = f"/jobs/{self.job_id}/video"
 
+    def mark_stop_requested(self) -> None:
+        with self._lock:
+            if self.status in {"completed", "failed", "cancelled", "stopped"}:
+                return
+            self.status = "stopping"
+            self._control.request_stop()
+
+    def mark_stopped(self, metadata_path: str | None) -> None:
+        with self._lock:
+            progress = 100.0 if self.total_frames <= 0 else round((self.completed_frames / max(self.total_frames, 1)) * 100.0, 2)
+            self.status = "stopped"
+            self.progress = progress
+            self.eta_seconds = 0.0
+            self.metadata_path = metadata_path
+            self.video_url = f"/jobs/{self.job_id}/video"
+
+    def mark_cancel_requested(self) -> None:
+        with self._lock:
+            if self.status in {"completed", "failed", "cancelled", "stopped"}:
+                return
+            self.status = "cancelling"
+            self._control.request_cancel()
+
+    def mark_cancelled(self) -> None:
+        with self._lock:
+            self.status = "cancelled"
+            self.progress = 0.0
+            self.eta_seconds = None
+            self.metadata_path = None
+            self.video_url = None
+
     def mark_failed(self, error: str) -> None:
         with self._lock:
             self.status = "failed"
             self.error = error
             self.eta_seconds = None
+
+    def request_stop(self) -> None:
+        self.mark_stop_requested()
+
+    def request_cancel(self) -> None:
+        self.mark_cancel_requested()
 
 
 class JobManager:
@@ -95,11 +135,30 @@ class JobManager:
         with self._jobs_lock:
             return self._jobs.get(job_id)
 
+    def request_stop(self, job_id: str) -> JobRecord | None:
+        record = self.get(job_id)
+        if record is not None:
+            record.request_stop()
+        return record
+
+    def request_cancel(self, job_id: str) -> JobRecord | None:
+        record = self.get(job_id)
+        if record is not None:
+            record.request_cancel()
+        return record
+
     def _run_job(self, record: JobRecord, config) -> None:
         record.mark_running()
         try:
-            exporter = VideoExporter(config, progress_callback=record.update_progress)
+            exporter = VideoExporter(config, progress_callback=record.update_progress, control=record._control)
             result = exporter.export(record.output_path)
-            record.mark_complete(result.metadata_path)
+            if result.status == "completed":
+                record.mark_complete(result.metadata_path)
+            elif result.status == "stopped":
+                record.mark_stopped(result.metadata_path)
+            elif result.status == "cancelled":
+                record.mark_cancelled()
+            else:  # pragma: no cover - defensive against future statuses
+                record.mark_failed(f"Unknown export status: {result.status}")
         except Exception as exc:  # pragma: no cover - surfaced through API
             record.mark_failed(str(exc))

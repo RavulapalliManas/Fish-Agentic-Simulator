@@ -73,12 +73,24 @@ class PreviewAgent(BaseModel):
     group: str
 
 
+class PreviewFrame(BaseModel):
+    """One frame within the lightweight preview clip."""
+
+    time_seconds: float
+    metrics: dict[str, Any]
+    agents: list[PreviewAgent]
+
+
 class PreviewResponse(BaseModel):
-    """Deterministic preview snapshot sampled from the simulation engine."""
+    """Deterministic preview clip sampled from the simulation engine."""
 
     phase: str
     width: int
     height: int
     attractors: dict[str, PreviewPoint]
-    agents: list[PreviewAgent]
+    preview_fps: int
+    loop_duration_seconds: float
+    preview_agent_count: int
+    frames: list[PreviewFrame]
     metrics: dict[str, Any]
+    warnings: list[str] = Field(default_factory=list)

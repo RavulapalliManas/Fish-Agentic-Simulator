@@ -1,4 +1,4 @@
-import { useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import type { PreviewResponse } from "../lib/api";
 import type { AppConfig, AttractorKey } from "../lib/defaults";
@@ -8,6 +8,7 @@ type StimulusPreviewProps = {
   preview: PreviewResponse | null;
   designMode: boolean;
   ghostAgentsEnabled: boolean;
+  playbackEnabled: boolean;
   selectedAttractor: AttractorKey;
   onPlaceAttractor: (point: { x: number; y: number }) => void;
 };
@@ -23,10 +24,39 @@ function StimulusPreview({
   preview,
   designMode,
   ghostAgentsEnabled,
+  playbackEnabled,
   selectedAttractor,
   onPlaceAttractor,
 }: StimulusPreviewProps) {
   const svgRef = useRef<SVGSVGElement | null>(null);
+  const [frameIndex, setFrameIndex] = useState(0);
+
+  useEffect(() => {
+    setFrameIndex(0);
+  }, [preview]);
+
+  useEffect(() => {
+    if (!preview || designMode || !playbackEnabled || preview.frames.length <= 1) {
+      return;
+    }
+
+    const intervalMs = Math.max(40, Math.round(1000 / Math.max(preview.preview_fps, 1)));
+    const handle = window.setInterval(() => {
+      setFrameIndex((current) => (current + 1) % preview.frames.length);
+    }, intervalMs);
+
+    return () => window.clearInterval(handle);
+  }, [designMode, playbackEnabled, preview]);
+
+  const activeFrame = useMemo(() => {
+    if (!preview || preview.frames.length === 0) {
+      return null;
+    }
+    if (designMode || !playbackEnabled) {
+      return preview.frames[preview.frames.length - 1];
+    }
+    return preview.frames[Math.min(frameIndex, preview.frames.length - 1)];
+  }, [designMode, frameIndex, playbackEnabled, preview]);
 
   const attractors = useMemo(
     () => ({
@@ -57,7 +87,7 @@ function StimulusPreview({
   };
 
   return (
-    <div className="preview-shell relative overflow-hidden rounded-[30px] border border-[color:var(--line-strong)] bg-[color:var(--panel-strong)]">
+    <div className="preview-shell relative overflow-hidden rounded-[34px] border border-[color:var(--line-strong)] bg-[color:var(--panel-strong)]">
       <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top,rgba(19,132,122,0.16),transparent_42%),radial-gradient(circle_at_bottom_right,rgba(219,110,63,0.18),transparent_38%)]" />
       <svg
         ref={svgRef}
@@ -113,7 +143,7 @@ function StimulusPreview({
         })}
 
         {ghostAgentsEnabled &&
-          preview?.agents.map((agent, index) => (
+          activeFrame?.agents.map((agent, index) => (
             <g
               key={`${agent.group}-${index}`}
               className={!designMode ? "preview-agent" : undefined}
@@ -121,16 +151,16 @@ function StimulusPreview({
             >
               {config.shape === "circle" ? (
                 <circle
-                  fill={groupColor(agent.group, preview.phase)}
+                  fill={groupColor(agent.group, preview?.phase ?? "center")}
                   opacity={0.92}
-                  r={Math.max(3, config.size * 0.68)}
+                  r={Math.max(4, config.size * 0.88)}
                   stroke="rgba(255,255,255,0.72)"
                   strokeWidth={0.8}
                 />
               ) : (
                 <path
-                  d={shapePath(config.shape, config.size * 0.78)}
-                  fill={groupColor(agent.group, preview.phase)}
+                  d={shapePath(config.shape, config.size * 0.92)}
+                  fill={groupColor(agent.group, preview?.phase ?? "center")}
                   opacity={0.92}
                   stroke="rgba(255,255,255,0.72)"
                   strokeWidth={0.8}
@@ -139,6 +169,16 @@ function StimulusPreview({
             </g>
           ))}
       </svg>
+
+      <div className="pointer-events-none absolute left-4 top-4 rounded-full border border-[color:var(--line-strong)] bg-white/88 px-4 py-2 text-[11px] font-semibold uppercase tracking-[0.22em] text-[color:var(--ink-muted)] shadow-[0_12px_30px_rgba(15,33,46,0.12)] backdrop-blur">
+        {designMode ? "Preview paused for layout editing" : playbackEnabled ? "Looping preview clip" : "Preview held"}
+      </div>
+
+      {activeFrame && (
+        <div className="pointer-events-none absolute right-4 top-4 rounded-full border border-[color:var(--line-strong)] bg-white/88 px-4 py-2 text-[11px] font-semibold uppercase tracking-[0.22em] text-[color:var(--ink-muted)] shadow-[0_12px_30px_rgba(15,33,46,0.12)] backdrop-blur">
+          {activeFrame.time_seconds.toFixed(1)}s
+        </div>
+      )}
 
       {designMode && (
         <div className="pointer-events-none absolute bottom-4 left-4 rounded-full border border-[color:var(--line-strong)] bg-white/88 px-4 py-2 text-xs font-semibold uppercase tracking-[0.22em] text-[color:var(--ink-muted)] shadow-[0_12px_30px_rgba(15,33,46,0.12)] backdrop-blur">

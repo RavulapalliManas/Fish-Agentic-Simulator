@@ -42,13 +42,23 @@ export type PreviewAgent = {
   group: string;
 };
 
+export type PreviewFrame = {
+  time_seconds: number;
+  metrics: Record<string, string | number>;
+  agents: PreviewAgent[];
+};
+
 export type PreviewResponse = {
   phase: string;
   width: number;
   height: number;
   attractors: Record<string, PreviewPoint>;
-  agents: PreviewAgent[];
+  preview_fps: number;
+  loop_duration_seconds: number;
+  preview_agent_count: number;
+  frames: PreviewFrame[];
   metrics: Record<string, string | number>;
+  warnings: string[];
 };
 
 async function parseJson<T>(response: Response): Promise<T> {
@@ -81,6 +91,22 @@ export async function startSimulation(baseUrl: string, config: AppConfig): Promi
 
 export async function fetchStatus(baseUrl: string, jobId: string): Promise<StatusResponse> {
   return parseJson<StatusResponse>(await fetch(`${baseUrl}/status?job_id=${encodeURIComponent(jobId)}`));
+}
+
+export async function stopSimulation(baseUrl: string, jobId: string): Promise<StatusResponse> {
+  return parseJson<StatusResponse>(
+    await fetch(`${baseUrl}/jobs/${encodeURIComponent(jobId)}/stop`, {
+      method: "POST",
+    }),
+  );
+}
+
+export async function cancelSimulation(baseUrl: string, jobId: string): Promise<StatusResponse> {
+  return parseJson<StatusResponse>(
+    await fetch(`${baseUrl}/jobs/${encodeURIComponent(jobId)}/cancel`, {
+      method: "POST",
+    }),
+  );
 }
 
 export async function fetchOptimization(

@@ -32,10 +32,11 @@ class VicsekConsensusModel(BaseModel):
             cohesion = normalize(centroid - agent.position, fallback=current_direction) * target_speed - agent.velocity
 
         separation = np.zeros(2, dtype=float)
+        personal_space = max(float(config.separation_radius), float(config.minimum_agent_spacing))
         for neighbor in neighbors:
             offset = agent.position - neighbor.position
             distance = float(np.linalg.norm(offset))
-            if 0.0 < distance < config.separation_radius:
+            if 0.0 < distance < personal_space:
                 separation += offset / max(distance ** 2, 1.0)
 
         consensus_force = consensus_direction * target_speed - agent.velocity

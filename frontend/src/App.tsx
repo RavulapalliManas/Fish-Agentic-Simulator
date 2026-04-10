@@ -1,59 +1,88 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { startTransition, useDeferredValue, useEffect, useMemo, useState, type ReactNode } from "react";
 
 import StimulusPreview from "./components/StimulusPreview";
 import Tooltip from "./components/Tooltip";
 import {
+  cancelSimulation,
   fetchOptimization,
   fetchPreview,
   fetchStatus,
   startSimulation,
+  stopSimulation,
   type PreviewResponse,
   type StatusResponse,
 } from "./lib/api";
 import {
+  applyBehaviorPreset,
   applyLayoutPreset,
   attractorCoordinateKey,
   ATTRACTOR_OPTIONS,
+  BEHAVIOR_PRESETS,
+  CONTROL_SECTIONS,
   DEFAULT_CONFIG,
   DEFAULT_LAYOUT_PRESET_ID,
+  formatParameterValue,
+  getParameterWarning,
   LAYOUT_PRESETS,
   MODEL_OPTIONS,
+  PARAMETER_SPECS,
   PREVIEW_PHASE_OPTIONS,
   rebalanceSplit,
   scaleArenaLayout,
   SHAPE_OPTIONS,
-  TAB_COPY,
   type AppConfig,
   type AttractorKey,
+  type ParameterGroupId,
+  type ParameterSpec,
   type PreviewPhase,
-  type TabId,
 } from "./lib/defaults";
 import { getRuntimeInfo, waitForBackend, type RuntimeInfo } from "./lib/runtime";
 
+const ACTIVE_JOB_STATUSES = new Set(["queued", "running", "stopping", "cancelling"]);
+const TERMINAL_VIDEO_STATUSES = new Set(["completed", "stopped"]);
+
 function App() {
-  const [activeTab, setActiveTab] = useState<TabId>("dynamics");
   const [runtime, setRuntime] = useState<RuntimeInfo | null>(null);
   const [backendReady, setBackendReady] = useState(false);
   const [config, setConfig] = useState<AppConfig>(DEFAULT_CONFIG);
+  const deferredConfig = useDeferredValue(config);
+
   const [jobId, setJobId] = useState<string | null>(null);
   const [status, setStatus] = useState<StatusResponse | null>(null);
   const [preview, setPreview] = useState<PreviewResponse | null>(null);
+
   const [previewPhase, setPreviewPhase] = useState<PreviewPhase>("split");
-  const [previewMessage, setPreviewMessage] = useState("Sampling deterministic preview…");
+  const [previewNonce, setPreviewNonce] = useState(0);
+  const [previewLoopEnabled, setPreviewLoopEnabled] = useState(true);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [previewMessage, setPreviewMessage] = useState("Waiting for the backend so preview can begin.");
+
   const [designMode, setDesignMode] = useState(false);
+  const [advancedSettings, setAdvancedSettings] = useState(false);
   const [selectedAttractor, setSelectedAttractor] = useState<AttractorKey>("left");
   const [layoutPresetId, setLayoutPresetId] = useState(DEFAULT_LAYOUT_PRESET_ID);
+  const [behaviorPresetId, setBehaviorPresetId] = useState<string>("clean-split");
   const [ghostAgentsEnabled, setGhostAgentsEnabled] = useState(true);
+
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [infoMessage, setInfoMessage] = useState("Starting backend…");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [previewError, setPreviewError] = useState<string | null>(null);
 
-  const busy = status?.status === "queued" || status?.status === "running";
+  const busy = status ? ACTIVE_JOB_STATUSES.has(status.status) : false;
+  const canStop = status?.status === "queued" || status?.status === "running";
+  const canCancel = status ? ACTIVE_JOB_STATUSES.has(status.status) : false;
+  const controlsLocked = !backendReady || busy || designMode;
+  const environmentLocked = !backendReady || busy;
   const progressValue = Math.round(status?.progress ?? 0);
-  const currentPresetLabel = layoutPresetId === "custom"
-    ? "Custom Layout"
-    : (LAYOUT_PRESETS.find((entry) => entry.id === layoutPresetId)?.name ?? "Custom Layout");
+  const currentLayoutLabel =
+    layoutPresetId === "custom"
+      ? "Custom layout"
+      : (LAYOUT_PRESETS.find((preset) => preset.id === layoutPresetId)?.name ?? "Custom layout");
+  const currentBehaviorPresetLabel =
+    behaviorPresetId === "custom"
+      ? "Custom tuning"
+      : (BEHAVIOR_PRESETS.find((preset) => preset.id === behaviorPresetId)?.name ?? "Custom tuning");
 
   useEffect(() => {
     let active = true;
@@ -71,6 +100,7 @@ function App() {
           ...current,
           output_path: current.output_path || nextRuntime.defaultOutputPath,
         }));
+
         if (nextRuntime.startupError) {
           setErrorMessage(nextRuntime.startupError);
           setInfoMessage("Backend unavailable.");
@@ -88,8 +118,8 @@ function App() {
         setBackendReady(true);
         setInfoMessage(
           nextRuntime.mode === "browser"
-            ? "Browser mode connected to the manual backend. You can now preview and export stimuli."
-            : "Backend ready. Configure a deterministic stimulus and sample the preview.",
+            ? "Browser mode connected. Use the preview stage to inspect each setting before export."
+            : "Backend ready. Preview updates automatically as you tune the stimulus.",
         );
       } catch (error) {
         if (!active) {
@@ -122,12 +152,22 @@ function App() {
     const handle = window.setInterval(async () => {
       try {
         const nextStatus = await fetchStatus(runtime.baseUrl, jobId);
-        setStatus(nextStatus);
+        startTransition(() => {
+          setStatus(nextStatus);
+        });
+
         if (nextStatus.status === "completed") {
           window.clearInterval(handle);
           setPreviewUrl(`${runtime.baseUrl}${nextStatus.video_url}?t=${Date.now()}`);
-          setInfoMessage("Video complete. Preview is ready.");
-          setActiveTab("output");
+          setInfoMessage("Video complete. Final MP4 ready for inspection.");
+        } else if (nextStatus.status === "stopped") {
+          window.clearInterval(handle);
+          setPreviewUrl(`${runtime.baseUrl}${nextStatus.video_url}?t=${Date.now()}`);
+          setInfoMessage("Render stopped cleanly after the current frame. Partial MP4 is ready.");
+        } else if (nextStatus.status === "cancelled") {
+          window.clearInterval(handle);
+          setPreviewUrl(null);
+          setInfoMessage("Render cancelled. Partial output was cleared and the console is ready again.");
         } else if (nextStatus.status === "failed") {
           window.clearInterval(handle);
           setErrorMessage(nextStatus.error ?? "Video generation failed.");
@@ -149,14 +189,18 @@ function App() {
     const controller = new AbortController();
     const handle = window.setTimeout(async () => {
       try {
+        setPreviewLoading(true);
         setPreviewError(null);
-        setPreviewMessage("Sampling deterministic preview…");
-        const nextPreview = await fetchPreview(runtime.baseUrl, config, previewPhase, controller.signal);
-        setPreview(nextPreview);
+        setPreviewMessage("Sampling preview clip from the live simulation engine…");
+        const nextPreview = await fetchPreview(runtime.baseUrl, deferredConfig, previewPhase, controller.signal);
+        startTransition(() => {
+          setPreview(nextPreview);
+        });
+        setPreviewLoopEnabled(true);
         setPreviewMessage(
           designMode
-            ? "Design mode is paused on this layout snapshot."
-            : "Preview sampled from the live simulation engine.",
+            ? "Design mode is active, so the preview is held on a paused layout frame."
+            : "Preview clip is looping from the live deterministic engine.",
         );
       } catch (error) {
         if (controller.signal.aborted) {
@@ -164,54 +208,96 @@ function App() {
         }
         setPreviewError(error instanceof Error ? error.message : "Unable to refresh preview.");
         setPreviewMessage("Preview unavailable.");
+      } finally {
+        if (!controller.signal.aborted) {
+          setPreviewLoading(false);
+        }
       }
-    }, 140);
+    }, 180);
 
     return () => {
       controller.abort();
       window.clearTimeout(handle);
     };
-  }, [backendReady, config, designMode, previewPhase, runtime]);
-
-  const summaryRows = useMemo(
-    () => [
-      { label: "Model", value: config.model_type },
-      { label: "Shoal", value: `${config.number_of_agents} agents` },
-      { label: "Split", value: `${config.left_count} left / ${config.right_count} right` },
-      { label: "Cluster", value: `${config.target_cluster_radius}px radius` },
-      { label: "Layout", value: currentPresetLabel },
-    ],
-    [config, currentPresetLabel],
-  );
+  }, [backendReady, deferredConfig, designMode, previewNonce, previewPhase, runtime]);
 
   const previewMetrics = useMemo(
     () => [
-      { label: "Phase", value: preview?.phase ?? previewPhase },
+      { label: "Preview phase", value: humanizePhase(preview?.phase ?? previewPhase) },
+      { label: "Preview fish", value: preview ? `${preview.preview_agent_count}` : "--" },
       {
         label: "Spread",
         value: typeof preview?.metrics.spread === "number" ? preview.metrics.spread.toFixed(1) : "--",
       },
       {
-        label: "Avg speed",
+        label: "Average speed",
         value: typeof preview?.metrics.avg_speed === "number" ? preview.metrics.avg_speed.toFixed(1) : "--",
       },
       {
-        label: "Left count",
-        value: typeof preview?.metrics.left_count === "number" ? String(preview.metrics.left_count) : String(config.left_count),
+        label: "Left branch",
+        value: `${config.left_count}`,
       },
       {
-        label: "Right count",
-        value: typeof preview?.metrics.right_count === "number" ? String(preview.metrics.right_count) : String(config.right_count),
+        label: "Right branch",
+        value: `${config.right_count}`,
       },
     ],
     [config.left_count, config.right_count, preview, previewPhase],
   );
 
-  const updateConfigValue = <K extends keyof AppConfig>(key: K, value: AppConfig[K]) => {
+  const summaryRows = useMemo(
+    () => [
+      { label: "Motion model", value: config.model_type },
+      { label: "Shoal plan", value: `${config.number_of_agents} fish` },
+      { label: "Split plan", value: `${config.left_count} left / ${config.right_count} right` },
+      { label: "Layout", value: currentLayoutLabel },
+      { label: "Preset", value: currentBehaviorPresetLabel },
+      { label: "Arena", value: `${config.output_width} x ${config.output_height}` },
+    ],
+    [config, currentBehaviorPresetLabel, currentLayoutLabel],
+  );
+
+  const localWarnings = useMemo(() => {
+    const warnings = PARAMETER_SPECS.map((spec) => getParameterWarning(spec, Number(config[spec.key]))).filter(
+      (warning): warning is string => Boolean(warning),
+    );
+
+    if (config.time_to_split - config.time_in_center < 0.75) {
+      warnings.push("Stabilization time is very short, so the shoal may split before it looks settled.");
+    }
+
+    if (config.video_duration - config.time_to_split < 1.5) {
+      warnings.push("The post-split observation window is short; consider extending the duration or starting the split earlier.");
+    }
+
+    if (Math.abs(config.right_attractor_x - config.left_attractor_x) < config.output_width * 0.18) {
+      warnings.push("The left and right attractors are close together, which can reduce visual separation between the shoals.");
+    }
+
+    return uniqueStrings(warnings);
+  }, [config]);
+
+  const warnings = useMemo(
+    () => uniqueStrings([...(preview?.warnings ?? []), ...localWarnings]),
+    [localWarnings, preview?.warnings],
+  );
+
+  const updateConfigValue = <K extends keyof AppConfig>(
+    key: K,
+    value: AppConfig[K],
+    options?: { markBehaviorCustom?: boolean; markLayoutCustom?: boolean },
+  ) => {
+    if (options?.markBehaviorCustom) {
+      setBehaviorPresetId("custom");
+    }
+    if (options?.markLayoutCustom) {
+      setLayoutPresetId("custom");
+    }
     setConfig((current) => ({ ...current, [key]: value }));
   };
 
   const handleAgentCountChange = (nextValue: number) => {
+    setBehaviorPresetId("custom");
     setConfig((current) => {
       const preservedShare = current.left_count / Math.max(current.number_of_agents, 1);
       return {
@@ -222,30 +308,61 @@ function App() {
   };
 
   const handleLeftCountChange = (nextValue: number) => {
+    setBehaviorPresetId("custom");
     setConfig((current) => ({
       ...current,
       ...rebalanceSplit(current.number_of_agents, nextValue),
     }));
   };
 
-  const handleRightCountChange = (nextValue: number) => {
+  const handleResolutionChange = (dimension: "width" | "height", nextValue: number) => {
+    setConfig((current) => {
+      const nextWidth = dimension === "width" ? Math.max(640, Math.round(nextValue)) : current.output_width;
+      const nextHeight = dimension === "height" ? Math.max(360, Math.round(nextValue)) : current.output_height;
+      return scaleArenaLayout(current, nextWidth, nextHeight);
+    });
+  };
+
+  const handleTimeInCenterChange = (nextValue: number) => {
+    setBehaviorPresetId("custom");
+    setConfig((current) => {
+      const timeInCenter = Math.max(0.5, nextValue);
+      const minimumSplitTime = timeInCenter + 0.6;
+      return {
+        ...current,
+        time_in_center: timeInCenter,
+        time_to_split: Math.max(current.time_to_split, minimumSplitTime),
+      };
+    });
+  };
+
+  const handleTimeToSplitChange = (nextValue: number) => {
+    setBehaviorPresetId("custom");
     setConfig((current) => ({
       ...current,
-      ...rebalanceSplit(current.number_of_agents, current.number_of_agents - Math.round(nextValue)),
+      time_to_split: Math.max(current.time_in_center + 0.6, nextValue),
     }));
   };
 
-  const handleResolutionChange = (dimension: "width" | "height", nextValue: number) => {
+  const handleVideoDurationChange = (nextValue: number) => {
     setConfig((current) => {
-      const nextWidth = dimension === "width" ? Math.max(160, Math.round(nextValue)) : current.output_width;
-      const nextHeight = dimension === "height" ? Math.max(120, Math.round(nextValue)) : current.output_height;
-      return scaleArenaLayout(current, nextWidth, nextHeight);
+      const videoDuration = Math.max(3, nextValue);
+      return {
+        ...current,
+        video_duration: videoDuration,
+        time_to_split: Math.min(current.time_to_split, Math.max(current.time_in_center + 0.6, videoDuration - 0.8)),
+      };
     });
   };
 
   const handleLayoutPresetChange = (nextPresetId: string) => {
     setLayoutPresetId(nextPresetId);
     setConfig((current) => applyLayoutPreset(current, nextPresetId));
+  };
+
+  const handleBehaviorPresetChange = (nextPresetId: string) => {
+    setBehaviorPresetId(nextPresetId);
+    setConfig((current) => applyBehaviorPreset(current, nextPresetId));
   };
 
   const handleAttractorPlacement = (point: { x: number; y: number }) => {
@@ -262,14 +379,20 @@ function App() {
   const handleDesignModeToggle = () => {
     setDesignMode((current) => {
       const nextValue = !current;
-      if (nextValue) {
-        setActiveTab("layout");
-        setInfoMessage("Design mode active. Layout editing is isolated from rendering controls.");
-      } else {
-        setInfoMessage("Design mode off. Full parameter editing restored.");
-      }
+      setPreviewLoopEnabled(!nextValue);
+      setInfoMessage(
+        nextValue
+          ? "Design mode is active. Preview playback is paused and only layout editing remains enabled."
+          : "Design mode is off. Full parameter editing and preview playback have resumed.",
+      );
       return nextValue;
     });
+  };
+
+  const handleSeePreview = () => {
+    setPreviewLoopEnabled(true);
+    setPreviewNonce((current) => current + 1);
+    setPreviewMessage("Sampling a fresh preview clip…");
   };
 
   const handleGenerate = async () => {
@@ -294,9 +417,38 @@ function App() {
         video_url: response.video_url,
         error: null,
       });
-      setInfoMessage("Rendering started. Polling progress every 0.5 seconds.");
+      setInfoMessage("Rendering started. You can stop gracefully or cancel immediately from the run panel.");
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : "Failed to start simulation.");
+    }
+  };
+
+  const handleStop = async () => {
+    if (!runtime || !jobId) {
+      return;
+    }
+    setErrorMessage(null);
+    try {
+      const nextStatus = await stopSimulation(runtime.baseUrl, jobId);
+      setStatus(nextStatus);
+      setInfoMessage("Stopping after the current frame. The partial MP4 will remain available.");
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : "Failed to stop the simulation.");
+    }
+  };
+
+  const handleCancel = async () => {
+    if (!runtime || !jobId) {
+      return;
+    }
+    setErrorMessage(null);
+    try {
+      const nextStatus = await cancelSimulation(runtime.baseUrl, jobId);
+      setStatus(nextStatus);
+      setPreviewUrl(null);
+      setInfoMessage("Cancelling immediately and clearing partial output…");
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : "Failed to cancel the simulation.");
     }
   };
 
@@ -318,6 +470,7 @@ function App() {
           fps: suggestion.fps,
         };
       });
+      setBehaviorPresetId("custom");
       setInfoMessage(
         `Optimized for ${suggestion.cpu_cores} CPU cores, ${suggestion.ram_gb.toFixed(1)} GB RAM, and ${suggestion.recommended_parallel_jobs} parallel sweep workers.`,
       );
@@ -326,20 +479,70 @@ function App() {
     }
   };
 
-  const lockedOutsideLayout = !backendReady || busy || designMode;
+  const renderParameterField = (spec: ParameterSpec) => {
+    if (spec.advanced && !advancedSettings) {
+      return null;
+    }
+
+    const value = Number(config[spec.key]);
+    const onChange = (nextValue: number) => {
+      if (spec.key === "number_of_agents") {
+        handleAgentCountChange(nextValue);
+        return;
+      }
+      if (spec.key === "time_in_center") {
+        handleTimeInCenterChange(nextValue);
+        return;
+      }
+      if (spec.key === "time_to_split") {
+        handleTimeToSplitChange(nextValue);
+        return;
+      }
+      if (spec.key === "video_duration") {
+        handleVideoDurationChange(nextValue);
+        return;
+      }
+      if (spec.key === "output_width") {
+        handleResolutionChange("width", nextValue);
+        return;
+      }
+      if (spec.key === "output_height") {
+        handleResolutionChange("height", nextValue);
+        return;
+      }
+      updateConfigValue(spec.key, nextValue as AppConfig[typeof spec.key], {
+        markBehaviorCustom: spec.group !== "rendering" && spec.group !== "environment",
+      });
+    };
+
+    return (
+      <ParameterSlider
+        key={spec.key}
+        disabled={spec.group === "environment" ? environmentLocked : controlsLocked}
+        spec={spec}
+        value={value}
+        onChange={onChange}
+      />
+    );
+  };
+
+  const presetOptions = behaviorPresetId === "custom"
+    ? [{ id: "custom", name: "Custom tuning", description: "Manual adjustments are active.", patch: {} }, ...BEHAVIOR_PRESETS]
+    : BEHAVIOR_PRESETS;
 
   return (
     <div className="min-h-screen px-4 py-4 text-[color:var(--ink)] md:px-6 lg:px-8">
-      <div className="mx-auto flex max-w-[1640px] flex-col gap-5">
-        <header className="panel-surface overflow-hidden rounded-[34px] px-6 py-6 md:px-8">
+      <div className="mx-auto flex max-w-[1680px] flex-col gap-6">
+        <header className="panel-surface overflow-hidden rounded-[36px] px-6 py-6 md:px-8 md:py-8">
           <div className="grid gap-6 xl:grid-cols-[minmax(0,1.2fr)_420px]">
             <div className="relative">
-              <p className="eyebrow">Collective Motion Stimulus Console</p>
+              <p className="eyebrow">Stimulus Design Console</p>
               <h1 className="mt-3 max-w-4xl font-display text-4xl leading-[0.98] tracking-[-0.04em] text-[color:var(--ink)] md:text-6xl">
-                Research-grade control over aggregation, stabilization, and deterministic split dynamics.
+                Make every setting visually interpretable before you export the experiment.
               </h1>
-              <p className="mt-4 max-w-2xl text-sm leading-7 text-[color:var(--ink-muted)] md:text-base">
-                Build reproducible MP4 stimuli with exact branch counts, seeded motion, and a dedicated layout lab for attractor placement before export.
+              <p className="mt-4 max-w-3xl text-sm leading-7 text-[color:var(--ink-muted)] md:text-base">
+                This desktop console is tuned for lab users: preview-first controls, exact split counts, safe biological ranges,
+                and clean stop or cancel handling for deterministic MP4 generation.
               </p>
             </div>
 
@@ -352,47 +555,36 @@ function App() {
                   </p>
                   <p className="mt-2 text-sm text-[color:var(--ink-muted)]">{infoMessage}</p>
                 </div>
-                <span className={`status-pill ${errorMessage ? "bg-rose-100 text-rose-700" : backendReady ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700"}`}>
+                <span className={`status-pill ${statusTone(errorMessage, backendReady)}`}>
                   {errorMessage ? "Error" : backendReady ? "Ready" : "Starting"}
                 </span>
               </div>
 
               <div className="panel-soft flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
-                <div className="flex items-center gap-3">
-                  <div className={`toggle-ring ${designMode ? "toggle-ring-on" : ""}`}>
-                    <button
-                      aria-pressed={designMode}
-                      className={`toggle-knob ${designMode ? "translate-x-6" : ""}`}
-                      disabled={!backendReady || busy}
-                      type="button"
-                      onClick={handleDesignModeToggle}
-                    />
+                <div className="space-y-1">
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm font-semibold text-[color:var(--ink)]">Advanced Settings</span>
+                    <Tooltip content="Shows expert-facing controls such as turning bias, interaction radii, and seed selection. Leave this off for a cleaner biology-first workflow." />
                   </div>
-                  <div>
-                    <div className="flex items-center gap-2">
-                      <span className="text-sm font-semibold text-[color:var(--ink)]">Design mode</span>
-                      <Tooltip content="Pauses the preview loop and locks the app into layout editing so attractor placement can be adjusted without changing the rest of the simulation." />
-                    </div>
-                    <p className="mt-1 text-xs uppercase tracking-[0.2em] text-[color:var(--ink-faint)]">
-                      {designMode ? "Layout editing isolated" : "Full console unlocked"}
-                    </p>
-                  </div>
+                  <p className="text-xs uppercase tracking-[0.22em] text-[color:var(--ink-faint)]">
+                    {advancedSettings ? "Expert controls visible" : "Only essential controls visible"}
+                  </p>
                 </div>
 
-                <div className="flex flex-wrap gap-3">
+                <div className="flex items-center gap-3">
+                  <ToggleControl
+                    checked={advancedSettings}
+                    disabled={!backendReady || busy}
+                    label="Advanced"
+                    tooltip="Toggles expert-level controls that are hidden by default for non-specialist users."
+                    onChange={setAdvancedSettings}
+                  />
                   <button
                     className="action-button action-button-secondary"
                     disabled={!backendReady || busy}
                     onClick={handleAutoOptimize}
                   >
-                    Auto optimize
-                  </button>
-                  <button
-                    className="action-button"
-                    disabled={!backendReady || busy || designMode}
-                    onClick={handleGenerate}
-                  >
-                    {busy ? "Generating…" : "Generate MP4"}
+                    Optimize for this machine
                   </button>
                 </div>
               </div>
@@ -400,63 +592,45 @@ function App() {
           </div>
         </header>
 
-        <main className="grid gap-5 xl:grid-cols-[280px_minmax(0,1fr)_360px]">
-          <aside className="panel-surface flex flex-col rounded-[30px] p-4">
-            <div className="space-y-2">
-              {TAB_COPY.map((tab) => {
-                const disabled = designMode && tab.id !== "layout";
-                return (
-                  <button
-                    key={tab.id}
-                    className={`tab-button ${activeTab === tab.id ? "tab-button-active" : ""}`}
-                    disabled={disabled}
-                    onClick={() => setActiveTab(tab.id)}
-                  >
-                    <p className="text-sm font-semibold">{tab.title}</p>
-                    <p className="mt-1 text-xs leading-5 opacity-70">{tab.description}</p>
-                  </button>
-                );
-              })}
-            </div>
-
-            <div className="mt-5 panel-soft space-y-3">
-              <p className="eyebrow text-[color:var(--ink-faint)]">Study Summary</p>
-              {summaryRows.map((row) => (
-                <div key={row.label} className="flex items-center justify-between gap-3 text-sm">
-                  <span className="text-[color:var(--ink-muted)]">{row.label}</span>
-                  <span className="text-right font-semibold text-[color:var(--ink)]">{row.value}</span>
-                </div>
-              ))}
-            </div>
-          </aside>
-
-          <section className="flex flex-col gap-5">
-            <div className="panel-surface rounded-[30px] p-5 md:p-6">
+        <main className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_420px]">
+          <section className="flex flex-col gap-6">
+            <div className="panel-surface rounded-[34px] p-5 md:p-6">
               <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
                 <div>
-                  <p className="eyebrow">Live Preview</p>
-                  <h2 className="mt-2 font-display text-3xl tracking-[-0.04em] text-[color:var(--ink)]">Layout lab and phase sampler</h2>
+                  <p className="eyebrow">Real-Time Preview</p>
+                  <h2 className="mt-2 font-display text-3xl tracking-[-0.04em] text-[color:var(--ink)]">
+                    See what each change does before you render
+                  </h2>
                   <p className="mt-2 max-w-2xl text-sm leading-6 text-[color:var(--ink-muted)]">
-                    Preview is sampled from the deterministic backend so the layout panel reflects the real split logic and shoal constraints rather than a toy approximation.
+                    The preview stage loops a short clip from the real deterministic engine using a lighter preview configuration,
+                    so model changes, split timing, and clustering controls stay visually interpretable while you work.
                   </p>
                 </div>
 
                 <div className="flex flex-wrap gap-3">
-                  <ToggleControl
-                    checked={ghostAgentsEnabled}
+                  <button
+                    className="action-button action-button-secondary"
                     disabled={!backendReady}
-                    label="Ghost agents"
-                    tooltip="Shows a sampled shoal snapshot so you can judge cohesion, spacing, and branch separation before committing to export."
-                    onChange={setGhostAgentsEnabled}
-                  />
+                    onClick={handleSeePreview}
+                  >
+                    {previewLoading ? "Refreshing preview…" : "See Preview"}
+                  </button>
+                  <button
+                    className="action-button"
+                    disabled={!backendReady || busy || designMode}
+                    onClick={handleGenerate}
+                  >
+                    Generate MP4
+                  </button>
                 </div>
               </div>
 
-              <div className="mt-5 grid gap-5 xl:grid-cols-[minmax(0,1fr)_320px]">
+              <div className="mt-6 grid gap-5 xl:grid-cols-[minmax(0,1fr)_320px]">
                 <StimulusPreview
                   config={config}
                   designMode={designMode}
                   ghostAgentsEnabled={ghostAgentsEnabled}
+                  playbackEnabled={previewLoopEnabled}
                   preview={preview}
                   selectedAttractor={selectedAttractor}
                   onPlaceAttractor={handleAttractorPlacement}
@@ -465,8 +639,8 @@ function App() {
                 <div className="flex flex-col gap-4">
                   <div className="panel-soft">
                     <LabelRow
-                      label="Preview phase"
-                      tooltip="Samples a representative frame from the selected phase of the experiment so you can inspect convergence, stabilization, or the final branch geometry."
+                      label="Preview Mode"
+                      tooltip="Choose which phase of the paradigm to preview. Each mode loops a short clip focused on that part of the experiment."
                     />
                     <div className="mt-3 flex flex-wrap gap-2">
                       {PREVIEW_PHASE_OPTIONS.map((option) => (
@@ -480,12 +654,38 @@ function App() {
                         </button>
                       ))}
                     </div>
+                    <p className="mt-3 text-sm leading-6 text-[color:var(--ink-muted)]">
+                      {PREVIEW_PHASE_OPTIONS.find((option) => option.id === previewPhase)?.description}
+                    </p>
                   </div>
 
                   <div className="panel-soft">
                     <LabelRow
-                      label="Preset layout"
-                      tooltip="Applies a reproducible attractor arrangement in normalized arena coordinates. Presets change only the attractor geometry, not the motion seed or split counts."
+                      label="Preview Toggles"
+                      tooltip="Turn on or off lightweight visual aids while you inspect the arena."
+                    />
+                    <div className="mt-3 flex flex-col gap-3">
+                      <ToggleControl
+                        checked={designMode}
+                        disabled={!backendReady || busy}
+                        label="Design Mode"
+                        tooltip="Pauses preview playback and leaves only layout editing active so you can place attractors safely."
+                        onChange={handleDesignModeToggle}
+                      />
+                      <ToggleControl
+                        checked={ghostAgentsEnabled}
+                        disabled={!backendReady}
+                        label="Ghost Fish"
+                        tooltip="Shows the preview fish positions on the arena so you can judge spread, cluster tightness, and branch separation."
+                        onChange={setGhostAgentsEnabled}
+                      />
+                    </div>
+                  </div>
+
+                  <div className="panel-soft">
+                    <LabelRow
+                      label="Layout Preset"
+                      tooltip="Applies a reproducible attractor arrangement. These presets change the geometry of the arena, not the seed or exact split counts."
                     />
                     <select
                       className="input-control mt-3"
@@ -502,15 +702,15 @@ function App() {
                     </select>
                     <p className="mt-3 text-sm leading-6 text-[color:var(--ink-muted)]">
                       {layoutPresetId === "custom"
-                        ? "Attractor positions are currently hand-edited from the canvas."
+                        ? "The attractors are currently hand-edited from the preview canvas."
                         : (LAYOUT_PRESETS.find((entry) => entry.id === layoutPresetId)?.description ?? "")}
                     </p>
                   </div>
 
                   <div className="panel-soft">
                     <LabelRow
-                      label="Placement target"
-                      tooltip="Selects which attractor the canvas click will update while design mode is active."
+                      label="Placement Target"
+                      tooltip="Choose which attractor the next canvas click will update while design mode is active."
                     />
                     <div className="mt-3 flex flex-wrap gap-2">
                       {ATTRACTOR_OPTIONS.map((option) => (
@@ -530,185 +730,251 @@ function App() {
                     <p className="eyebrow text-[color:var(--ink-faint)]">Preview status</p>
                     <p className="mt-2 text-sm leading-6 text-[color:var(--ink-muted)]">{previewMessage}</p>
                     {previewError && (
-                      <div className="mt-3 rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
+                      <div className="warning-box mt-3">
                         {previewError}
                       </div>
                     )}
                   </div>
                 </div>
               </div>
+
+              <div className="mt-5 grid gap-3 md:grid-cols-3 xl:grid-cols-6">
+                {previewMetrics.map((metric) => (
+                  <PreviewMetric key={metric.label} label={metric.label} value={metric.value} />
+                ))}
+              </div>
             </div>
 
-            <div className="panel-surface rounded-[30px] p-5 md:p-6">
-              {activeTab === "dynamics" && (
-                <fieldset disabled={lockedOutsideLayout} className={lockedOutsideLayout ? "opacity-55" : ""}>
-                  <SectionHeader
-                    title="Dynamics"
-                    description="Tune the local interaction model, baseline speed, and deterministic seed. These controls govern how strongly the shoal behaves like a cohesive animal group instead of a loose particle cloud."
-                  />
-                  <div className="mt-5 grid gap-4 md:grid-cols-2">
-                    <NumberField label="Random seed" tooltip="Sets the pseudo-random seed used for initialization and motion noise. The same seed and config reproduce the same video and exact split assignment." value={config.random_seed} min={0} step={1} onChange={(value) => updateConfigValue("random_seed", Math.max(0, Math.round(value)))} />
-                    <SelectField label="Model type" tooltip="Selects the interaction model used underneath the shared integrator. All models respect the same phase schedule and exact left/right counts." value={config.model_type} options={MODEL_OPTIONS} onChange={(value) => updateConfigValue("model_type", value)} />
-                    <NumberField label="Number of agents" tooltip="Sets the total shoal size in the arena. Left and right counts are automatically kept consistent with this total." value={config.number_of_agents} min={2} step={1} onChange={handleAgentCountChange} />
-                    <NumberField label="Baseline speed" tooltip="Sets the nominal cruising speed away from attractors. The paradigm will still reduce speed near targets during stabilization and post-split settling." value={config.speed} min={20} step={1} onChange={(value) => updateConfigValue("speed", Math.max(20, value))} />
-                    <NumberField label="Noise amplitude" tooltip="Controls correlated randomness in movement. Higher values increase disorder and weaken cluster stability, especially during stabilization." value={config.noise} min={0} max={2} step={0.01} onChange={(value) => updateConfigValue("noise", Math.max(0, value))} />
-                    <NumberField label="Cohesion strength" tooltip="Controls how strongly agents are pulled toward nearby neighbors. Higher values produce tighter clusters." value={config.cohesion} min={0} max={4} step={0.01} onChange={(value) => updateConfigValue("cohesion", Math.max(0, value))} />
-                    <NumberField label="Alignment strength" tooltip="Controls how strongly agents align their direction with neighbors. Higher values make each shoal travel as a coordinated unit." value={config.alignment} min={0} max={4} step={0.01} onChange={(value) => updateConfigValue("alignment", Math.max(0, value))} />
-                    <NumberField label="Separation strength" tooltip="Controls short-range repulsion between neighbors. Higher values prevent overlap, but excessive separation can broaden the shoal." value={config.separation} min={0} max={4} step={0.01} onChange={(value) => updateConfigValue("separation", Math.max(0, value))} />
-                  </div>
-                </fieldset>
-              )}
+            <div className="grid gap-5 lg:grid-cols-2">
+              <SectionPanel
+                description={CONTROL_SECTIONS.find((section) => section.id === "group-behavior")?.description ?? ""}
+                disabled={controlsLocked}
+                title="Group Behavior"
+              >
+                <SelectField
+                  disabled={controlsLocked}
+                  label="Motion Model"
+                  tooltip="Selects the interaction model used underneath the shared integrator. The preview updates instantly so you can compare each model visually."
+                  value={config.model_type}
+                  options={MODEL_OPTIONS}
+                  onChange={(value) => {
+                    setBehaviorPresetId("custom");
+                    updateConfigValue("model_type", value, { markBehaviorCustom: false });
+                  }}
+                />
+                <div className="mt-4 grid gap-4">
+                  {PARAMETER_SPECS.filter((spec) => spec.group === "group-behavior").map(renderParameterField)}
+                </div>
+              </SectionPanel>
 
-              {activeTab === "split" && (
-                <fieldset disabled={lockedOutsideLayout} className={lockedOutsideLayout ? "opacity-55" : ""}>
-                  <SectionHeader
-                    title="Split Logic"
-                    description="Specify exact branch membership and the constraints that keep each post-split shoal compact, legible, and biologically plausible."
-                  />
-                  <div className="mt-5 grid gap-4 md:grid-cols-2">
-                    <NumberField label="Left count" tooltip="Exact number of agents assigned to the left branch during the split phase. The right count is automatically updated so the total remains valid." value={config.left_count} min={0} max={config.number_of_agents} step={1} onChange={handleLeftCountChange} />
-                    <NumberField label="Right count" tooltip="Exact number of agents assigned to the right branch during the split phase. Adjusting this field updates the left count to preserve the total." value={config.right_count} min={0} max={config.number_of_agents} step={1} onChange={handleRightCountChange} />
-                    <NumberField label="Time in center (s)" tooltip="Duration of the aggregation phase before the shoal transitions into stabilization. Longer values give the school more time to converge." value={config.time_in_center} min={0} step={0.1} onChange={(value) => updateConfigValue("time_in_center", Math.max(0, value))} />
-                    <NumberField label="Time to split (s)" tooltip="Absolute time when the paradigm changes from center stabilization to left/right branch attraction." value={config.time_to_split} min={0.1} step={0.1} onChange={(value) => updateConfigValue("time_to_split", Math.max(0.1, value))} />
-                    <NumberField label="Neighbor radius" tooltip="Maximum distance for social interactions. Lower values emphasize local shoaling and help prevent overextended, diffuse clusters." value={config.neighbor_radius} min={10} step={1} onChange={(value) => updateConfigValue("neighbor_radius", Math.max(10, value))} />
-                    <NumberField label="Separation radius" tooltip="Distance at which repulsive steering engages. Smaller values let the cluster pack more tightly before separation pushes fish apart." value={config.separation_radius} min={2} step={1} onChange={(value) => updateConfigValue("separation_radius", Math.max(2, value))} />
-                    <NumberField label="Target cluster radius" tooltip="Desired maximum radius around each active attractor. Agents beyond this boundary receive an additional smooth restoring force instead of a hard clamp." value={config.target_cluster_radius} min={24} step={1} onChange={(value) => updateConfigValue("target_cluster_radius", Math.max(24, value))} />
-                    <NumberField label="Attractor strength" tooltip="Controls how strongly the active target pulls on each agent. Higher values speed convergence and sharpen branch commitment." value={config.attractor_strength} min={0} step={1} onChange={(value) => updateConfigValue("attractor_strength", Math.max(0, value))} />
-                    <NumberField label="Rotation strength" tooltip="Controls tangential steering around attractors. Keep this low to preserve natural arcing motion without reintroducing split-phase orbiting." value={config.rotation_strength} min={0} step={1} onChange={(value) => updateConfigValue("rotation_strength", Math.max(0, value))} />
-                  </div>
-                </fieldset>
-              )}
+              <SectionPanel
+                description={CONTROL_SECTIONS.find((section) => section.id === "movement-noise")?.description ?? ""}
+                disabled={controlsLocked}
+                title="Movement Noise"
+              >
+                <div className="grid gap-4">
+                  {PARAMETER_SPECS.filter((spec) => spec.group === "movement-noise").map(renderParameterField)}
+                </div>
+              </SectionPanel>
 
-              {activeTab === "layout" && (
-                <fieldset disabled={!backendReady || busy} className={!backendReady || busy ? "opacity-55" : ""}>
-                  <SectionHeader
-                    title="Layout Coordinates"
-                    description="Refine exact attractor coordinates numerically after placing them on the preview canvas. Coordinates are stored directly in the config and therefore stay reproducible with the seed."
-                  />
-                  <div className="mt-5 grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-                    <NumberField label="Center X" tooltip="Horizontal position of the aggregation attractor in arena pixels." value={config.center_attractor_x} min={0} step={1} onChange={(value) => { setLayoutPresetId("custom"); updateConfigValue("center_attractor_x", Math.max(0, value)); }} />
-                    <NumberField label="Center Y" tooltip="Vertical position of the aggregation attractor in arena pixels." value={config.center_attractor_y} min={0} step={1} onChange={(value) => { setLayoutPresetId("custom"); updateConfigValue("center_attractor_y", Math.max(0, value)); }} />
-                    <div className="hidden xl:block" />
-                    <NumberField label="Left X" tooltip="Horizontal position of the left split attractor in arena pixels." value={config.left_attractor_x} min={0} step={1} onChange={(value) => { setLayoutPresetId("custom"); updateConfigValue("left_attractor_x", Math.max(0, value)); }} />
-                    <NumberField label="Left Y" tooltip="Vertical position of the left split attractor in arena pixels." value={config.left_attractor_y} min={0} step={1} onChange={(value) => { setLayoutPresetId("custom"); updateConfigValue("left_attractor_y", Math.max(0, value)); }} />
-                    <div className="hidden xl:block" />
-                    <NumberField label="Right X" tooltip="Horizontal position of the right split attractor in arena pixels." value={config.right_attractor_x} min={0} step={1} onChange={(value) => { setLayoutPresetId("custom"); updateConfigValue("right_attractor_x", Math.max(0, value)); }} />
-                    <NumberField label="Right Y" tooltip="Vertical position of the right split attractor in arena pixels." value={config.right_attractor_y} min={0} step={1} onChange={(value) => { setLayoutPresetId("custom"); updateConfigValue("right_attractor_y", Math.max(0, value)); }} />
-                  </div>
-                </fieldset>
-              )}
+              <SectionPanel
+                description={CONTROL_SECTIONS.find((section) => section.id === "splitting-control")?.description ?? ""}
+                disabled={controlsLocked}
+                title="Splitting Control"
+              >
+                <SplitBalanceField
+                  disabled={controlsLocked}
+                  leftCount={config.left_count}
+                  rightCount={config.right_count}
+                  totalAgents={config.number_of_agents}
+                  onChange={handleLeftCountChange}
+                />
+                <div className="mt-4 grid gap-4">
+                  {PARAMETER_SPECS.filter((spec) => spec.group === "splitting-control").map(renderParameterField)}
+                </div>
+              </SectionPanel>
 
-              {activeTab === "rendering" && (
-                <fieldset disabled={lockedOutsideLayout} className={lockedOutsideLayout ? "opacity-55" : ""}>
-                  <SectionHeader
-                    title="Rendering"
-                    description="Lock the exported stimulus duration, temporal resolution, and arena size. Layout coordinates are rescaled proportionally when you change the output resolution."
+              <SectionPanel
+                description={CONTROL_SECTIONS.find((section) => section.id === "environment")?.description ?? ""}
+                disabled={environmentLocked}
+                title="Environment"
+              >
+                <div className="grid gap-4">
+                  {PARAMETER_SPECS.filter((spec) => spec.group === "environment").map(renderParameterField)}
+                  <CoordinateGrid
+                    config={config}
+                    disabled={environmentLocked}
+                    onChange={(key, value) => updateConfigValue(key, value, { markLayoutCustom: true })}
                   />
-                  <div className="mt-5 grid gap-4 md:grid-cols-2">
-                    <NumberField label="Duration (s)" tooltip="Final MP4 duration. Combined with FPS, this determines the total number of simulated frames." value={config.video_duration} min={0.1} step={0.1} onChange={(value) => updateConfigValue("video_duration", Math.max(0.1, value))} />
-                    <NumberField label="FPS" tooltip="Frames per second for both simulation stepping and MP4 export. Higher values create smoother motion but increase compute time." value={config.fps} min={1} step={1} onChange={(value) => updateConfigValue("fps", Math.max(1, Math.round(value)))} />
-                    <NumberField label="Output width" tooltip="Arena width in pixels. Attractor positions are scaled proportionally when this value changes." value={config.output_width} min={160} step={10} onChange={(value) => handleResolutionChange("width", value)} />
-                    <NumberField label="Output height" tooltip="Arena height in pixels. Attractor positions are scaled proportionally when this value changes." value={config.output_height} min={120} step={10} onChange={(value) => handleResolutionChange("height", value)} />
-                  </div>
-                </fieldset>
-              )}
+                </div>
+              </SectionPanel>
 
-              {activeTab === "appearance" && (
-                <fieldset disabled={lockedOutsideLayout} className={lockedOutsideLayout ? "opacity-55" : ""}>
-                  <SectionHeader
-                    title="Appearance"
-                    description="Choose the rendered geometry for each fish and the export surface color. These settings affect the MP4 presentation but not the underlying motion dynamics."
+              <SectionPanel
+                description={CONTROL_SECTIONS.find((section) => section.id === "rendering")?.description ?? ""}
+                disabled={controlsLocked}
+                title="Rendering"
+              >
+                <div className="grid gap-4">
+                  {PARAMETER_SPECS.filter((spec) => spec.group === "rendering").map(renderParameterField)}
+                  <SelectField
+                    disabled={controlsLocked}
+                    label="Marker Shape"
+                    tooltip="Controls the rendered marker shape used in the preview and exported MP4."
+                    value={config.shape}
+                    options={SHAPE_OPTIONS}
+                    onChange={(value) => updateConfigValue("shape", value, { markBehaviorCustom: false })}
                   />
-                  <div className="mt-5 grid gap-4 md:grid-cols-2">
-                    <SelectField label="Shape" tooltip="Rendered body geometry for each agent in the output video and preview panel." value={config.shape} options={SHAPE_OPTIONS} onChange={(value) => updateConfigValue("shape", value)} />
-                    <RangeField label="Size" tooltip="Visual size of each rendered fish shape in pixels. Larger values make the shoal easier to inspect at a distance." value={config.size} min={2} max={40} step={0.5} onChange={(value) => updateConfigValue("size", Math.max(2, value))} />
-                    <TextField label="Background color" tooltip="Hex color used for the arena background in both the preview and exported MP4." value={config.background_color} onChange={(value) => updateConfigValue("background_color", value)} />
-                  </div>
-                </fieldset>
-              )}
-
-              {activeTab === "output" && (
-                <fieldset disabled={!backendReady || busy || designMode} className={!backendReady || busy || designMode ? "opacity-55" : ""}>
-                  <SectionHeader
-                    title="Output"
-                    description="Choose the export destination, then launch a headless deterministic render. Progress is tracked without blocking the desktop shell."
+                  <TextField
+                    disabled={controlsLocked}
+                    label="Arena Background"
+                    tooltip="Sets the arena background color in both the preview panel and exported MP4."
+                    value={config.background_color}
+                    onChange={(value) => updateConfigValue("background_color", value, { markBehaviorCustom: false })}
                   />
-                  <div className="mt-5 space-y-4">
-                    <TextField label="Output path" tooltip="Absolute or relative MP4 destination. Metadata is written beside the MP4 when JSON sidecar export is enabled." value={config.output_path} onChange={(value) => updateConfigValue("output_path", value)} />
-                    <button
-                      className="action-button w-full justify-center md:w-auto"
-                      disabled={!backendReady || busy || designMode}
-                      onClick={handleGenerate}
-                    >
-                      {busy ? "Generating stimulus…" : "Generate deterministic MP4"}
-                    </button>
-                  </div>
-                </fieldset>
-              )}
+                  <TextField
+                    disabled={controlsLocked}
+                    label="Output Path"
+                    tooltip="Sets where the MP4 should be written. A metadata JSON file is written beside it when export completes."
+                    value={config.output_path}
+                    onChange={(value) => updateConfigValue("output_path", value, { markBehaviorCustom: false })}
+                  />
+                </div>
+              </SectionPanel>
             </div>
           </section>
 
-          <aside className="panel-surface flex flex-col gap-5 rounded-[30px] p-5">
-            <div>
-              <p className="eyebrow">Run Status</p>
-              <h2 className="mt-2 font-display text-3xl tracking-[-0.04em] text-[color:var(--ink)]">
-                {busy ? "Rendering stimulus" : "Console ready"}
-              </h2>
-              <p className="mt-2 text-sm leading-6 text-[color:var(--ink-muted)]">{infoMessage}</p>
-              {errorMessage && (
-                <div className="mt-4 rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
-                  {errorMessage}
+          <aside className="flex flex-col gap-5">
+            <div className="panel-surface rounded-[30px] p-5">
+              <p className="eyebrow">Quick Presets</p>
+              <h2 className="mt-2 font-display text-3xl tracking-[-0.04em] text-[color:var(--ink)]">Start from a safe behavioral profile</h2>
+              <p className="mt-2 text-sm leading-6 text-[color:var(--ink-muted)]">
+                These presets give non-specialist users a strong starting point before they fine-tune the preview.
+              </p>
+              <div className="mt-4 grid gap-3">
+                {presetOptions.map((preset) => (
+                  <PresetButton
+                    key={preset.id}
+                    active={behaviorPresetId === preset.id}
+                    description={preset.description}
+                    disabled={!backendReady || busy || designMode}
+                    label={preset.recommended ? `${preset.name} (Recommended)` : preset.name}
+                    onClick={() => handleBehaviorPresetChange(preset.id)}
+                  />
+                ))}
+              </div>
+            </div>
+
+            <div className="panel-surface rounded-[30px] p-5">
+              <div className="flex items-start justify-between gap-4">
+                <div>
+                  <p className="eyebrow">Run Control</p>
+                  <h2 className="mt-2 font-display text-3xl tracking-[-0.04em] text-[color:var(--ink)]">
+                    {busy ? "Rendering stimulus" : "Ready to export"}
+                  </h2>
+                  <p className="mt-2 text-sm leading-6 text-[color:var(--ink-muted)]">
+                    Progress, phase, and interruption controls stay available throughout the export lifecycle.
+                  </p>
                 </div>
-              )}
+                <span className={`status-pill ${jobTone(status?.status)}`}>{humanizeJobStatus(status?.status ?? (backendReady ? "idle" : "booting"))}</span>
+              </div>
+
+              {errorMessage && <div className="warning-box mt-4">{errorMessage}</div>}
+
+              <div className="status-panel-dark mt-5">
+                <div className="flex items-center justify-between">
+                  <span className="text-sm font-semibold text-white">Render progress</span>
+                  <span className="text-sm text-white/70">{progressValue}%</span>
+                </div>
+                <div className="mt-3 h-2 overflow-hidden rounded-full bg-white/10">
+                  <div className="h-full rounded-full bg-[color:var(--accent)] transition-all duration-300" style={{ width: `${progressValue}%` }} />
+                </div>
+                <div className="mt-4 grid grid-cols-2 gap-3 text-sm">
+                  <StatTile label="Job" value={jobId ? jobId.slice(0, 8) : "--"} />
+                  <StatTile label="Phase" value={humanizePhase(status?.phase)} />
+                  <StatTile label="ETA" value={formatEta(status?.eta_seconds)} />
+                  <StatTile label="State" value={humanizeJobStatus(status?.status ?? (backendReady ? "idle" : "booting"))} />
+                </div>
+              </div>
+
+              <div className="mt-4 flex flex-wrap gap-3">
+                <button
+                  className="action-button"
+                  disabled={!backendReady || busy || designMode}
+                  onClick={handleGenerate}
+                >
+                  Generate MP4
+                </button>
+                <button
+                  className="action-button action-button-secondary"
+                  disabled={!canStop}
+                  onClick={handleStop}
+                >
+                  Stop Gracefully
+                </button>
+                <button
+                  className="action-button action-button-danger"
+                  disabled={!canCancel}
+                  onClick={handleCancel}
+                >
+                  Cancel Now
+                </button>
+              </div>
             </div>
 
-            <div className="status-panel-dark">
-              <div className="flex items-center justify-between">
-                <span className="text-sm font-semibold text-white">Render progress</span>
-                <span className="text-sm text-white/70">{progressValue}%</span>
-              </div>
-              <div className="mt-3 h-2 overflow-hidden rounded-full bg-white/10">
-                <div className="h-full rounded-full bg-[color:var(--accent)] transition-all duration-300" style={{ width: `${progressValue}%` }} />
-              </div>
-              <div className="mt-4 grid grid-cols-2 gap-3 text-sm">
-                <StatTile label="Job" value={jobId ? jobId.slice(0, 8) : "--"} />
-                <StatTile label="Phase" value={status?.phase ?? preview?.phase ?? "--"} />
-                <StatTile label="ETA" value={status?.eta_seconds != null ? `${status.eta_seconds.toFixed(1)}s` : "--"} />
-                <StatTile label="Status" value={status?.status ?? (backendReady ? "idle" : "booting")} />
+            <div className="panel-surface rounded-[30px] p-5">
+              <p className="eyebrow">Safety Notes</p>
+              <h2 className="mt-2 font-display text-3xl tracking-[-0.04em] text-[color:var(--ink)]">Biological plausibility</h2>
+              <p className="mt-2 text-sm leading-6 text-[color:var(--ink-muted)]">
+                Warnings are non-blocking, but they flag settings that may make the motion harder to interpret in a real experiment.
+              </p>
+              <div className="mt-4 flex flex-col gap-3">
+                {warnings.length > 0 ? (
+                  warnings.map((warning) => (
+                    <div key={warning} className="warning-card">
+                      {warning}
+                    </div>
+                  ))
+                ) : (
+                  <div className="rounded-[22px] border border-emerald-200 bg-emerald-50 px-4 py-4 text-sm text-emerald-800">
+                    Current settings stay within the recommended operating ranges.
+                  </div>
+                )}
               </div>
             </div>
 
-            <div className="panel-soft">
-              <p className="eyebrow text-[color:var(--ink-faint)]">Preview metrics</p>
+            <div className="panel-surface rounded-[30px] p-5">
+              <p className="eyebrow">Study Summary</p>
               <div className="mt-4 space-y-3">
-                {previewMetrics.map((metric) => (
-                  <div key={metric.label} className="flex items-center justify-between gap-3 text-sm">
-                    <span className="text-[color:var(--ink-muted)]">{metric.label}</span>
-                    <span className="font-semibold text-[color:var(--ink)]">{metric.value}</span>
+                {summaryRows.map((row) => (
+                  <div key={row.label} className="flex items-center justify-between gap-3 text-sm">
+                    <span className="text-[color:var(--ink-muted)]">{row.label}</span>
+                    <span className="text-right font-semibold text-[color:var(--ink)]">{row.value}</span>
                   </div>
                 ))}
               </div>
             </div>
 
-            <div>
-              <div className="mb-3 flex items-center justify-between">
+            <div className="panel-surface rounded-[30px] p-5">
+              <div className="flex items-start justify-between gap-4">
                 <div>
-                  <p className="text-sm font-semibold text-[color:var(--ink)]">Video preview</p>
-                  <p className="text-xs text-[color:var(--ink-muted)]">The final MP4 is streamed back from the local backend after completion.</p>
+                  <p className="eyebrow">Video Preview</p>
+                  <p className="mt-2 text-sm leading-6 text-[color:var(--ink-muted)]">
+                    Completed or gracefully stopped exports appear here without leaving the desktop app.
+                  </p>
                 </div>
               </div>
 
-              {previewUrl ? (
+              {previewUrl && status?.status && TERMINAL_VIDEO_STATUSES.has(status.status) ? (
                 <video
                   key={previewUrl}
-                  className="aspect-video w-full rounded-[24px] border border-[color:var(--line-strong)] bg-slate-950 object-cover shadow-[0_18px_40px_rgba(15,33,46,0.14)]"
+                  className="mt-4 aspect-video w-full rounded-[24px] border border-[color:var(--line-strong)] bg-slate-950 object-cover shadow-[0_18px_40px_rgba(15,33,46,0.14)]"
                   controls
                   preload="metadata"
                   src={previewUrl}
                 />
               ) : (
-                <div className="flex aspect-video items-center justify-center rounded-[24px] border border-dashed border-[color:var(--line-strong)] bg-white/60 text-sm text-[color:var(--ink-muted)]">
-                  Generate a stimulus to inspect the final MP4 here.
+                <div className="mt-4 flex aspect-video items-center justify-center rounded-[24px] border border-dashed border-[color:var(--line-strong)] bg-white/60 text-sm text-[color:var(--ink-muted)]">
+                  Generate or gracefully stop a stimulus to inspect the resulting MP4 here.
                 </div>
               )}
 
@@ -728,17 +994,20 @@ function App() {
   );
 }
 
-type SectionHeaderProps = {
+type SectionPanelProps = {
   title: string;
   description: string;
+  disabled: boolean;
+  children: ReactNode;
 };
 
-function SectionHeader({ title, description }: SectionHeaderProps) {
+function SectionPanel({ title, description, disabled, children }: SectionPanelProps) {
   return (
-    <div>
+    <fieldset className={`panel-surface rounded-[30px] p-5 md:p-6 ${disabled ? "opacity-55" : ""}`} disabled={disabled}>
       <p className="eyebrow">{title}</p>
-      <p className="mt-2 max-w-3xl text-sm leading-6 text-[color:var(--ink-muted)]">{description}</p>
-    </div>
+      <p className="mt-2 text-sm leading-6 text-[color:var(--ink-muted)]">{description}</p>
+      <div className="mt-5">{children}</div>
+    </fieldset>
   );
 }
 
@@ -760,65 +1029,61 @@ function LabelRow({ label, tooltip, value }: LabelRowProps) {
   );
 }
 
-type FieldChromeProps = {
+type FieldShellProps = {
   label: string;
   tooltip: string;
   valueText?: string;
+  warning?: string | null;
   children: ReactNode;
 };
 
-function FieldChrome({ label, tooltip, valueText, children }: FieldChromeProps) {
+function FieldShell({ label, tooltip, valueText, warning, children }: FieldShellProps) {
   return (
     <div className="panel-soft">
       <LabelRow label={label} tooltip={tooltip} value={valueText} />
       <div className="mt-3">{children}</div>
+      {warning && <p className="mt-3 text-sm leading-6 text-amber-700">{warning}</p>}
     </div>
   );
 }
 
-type NumberFieldProps = {
-  label: string;
-  tooltip: string;
+type ParameterSliderProps = {
+  spec: ParameterSpec;
   value: number;
+  disabled: boolean;
   onChange: (value: number) => void;
-  min?: number;
-  max?: number;
-  step?: number;
 };
 
-function NumberField({ label, tooltip, value, onChange, min, max, step }: NumberFieldProps) {
-  return (
-    <FieldChrome label={label} tooltip={tooltip}>
-      <input
-        className="input-control"
-        type="number"
-        value={Number.isFinite(value) ? value : ""}
-        min={min}
-        max={max}
-        step={step}
-        onChange={(event) => {
-          const nextValue = Number(event.target.value);
-          if (Number.isFinite(nextValue)) {
-            onChange(nextValue);
-          }
-        }}
-      />
-    </FieldChrome>
-  );
-}
+function ParameterSlider({ spec, value, disabled, onChange }: ParameterSliderProps) {
+  const warning = getParameterWarning(spec, value);
+  const safeStart = ((spec.recommended[0] - spec.min) / (spec.max - spec.min)) * 100;
+  const safeEnd = ((spec.recommended[1] - spec.min) / (spec.max - spec.min)) * 100;
 
-type TextFieldProps = {
-  label: string;
-  tooltip: string;
-  value: string;
-  onChange: (value: string) => void;
-};
-
-function TextField({ label, tooltip, value, onChange }: TextFieldProps) {
   return (
-    <FieldChrome label={label} tooltip={tooltip}>
-      <input className="input-control" type="text" value={value} onChange={(event) => onChange(event.target.value)} />
-    </FieldChrome>
+    <FieldShell label={spec.label} tooltip={spec.tooltip} valueText={formatParameterValue(spec, value)} warning={warning}>
+      <div className="range-shell">
+        <div className="range-track">
+          <div className="range-safe-window" style={{ left: `${safeStart}%`, width: `${Math.max(0, safeEnd - safeStart)}%` }} />
+        </div>
+        <input
+          className="slider-control"
+          disabled={disabled}
+          max={spec.max}
+          min={spec.min}
+          step={spec.step}
+          type="range"
+          value={value}
+          onChange={(event) => onChange(Number(event.target.value))}
+        />
+      </div>
+      <div className="mt-3 flex items-center justify-between gap-3 text-xs uppercase tracking-[0.18em] text-[color:var(--ink-faint)]">
+        <span>{formatParameterValue(spec, spec.min)}</span>
+        <span>
+          Recommended {formatParameterValue(spec, spec.recommended[0])} to {formatParameterValue(spec, spec.recommended[1])}
+        </span>
+        <span>{formatParameterValue(spec, spec.max)}</span>
+      </div>
+    </FieldShell>
   );
 }
 
@@ -827,46 +1092,37 @@ type SelectFieldProps = {
   tooltip: string;
   value: string;
   options: string[];
+  disabled: boolean;
   onChange: (value: string) => void;
 };
 
-function SelectField({ label, tooltip, value, options, onChange }: SelectFieldProps) {
+function SelectField({ label, tooltip, value, options, disabled, onChange }: SelectFieldProps) {
   return (
-    <FieldChrome label={label} tooltip={tooltip}>
-      <select className="input-control" value={value} onChange={(event) => onChange(event.target.value)}>
+    <FieldShell label={label} tooltip={tooltip}>
+      <select className="input-control" disabled={disabled} value={value} onChange={(event) => onChange(event.target.value)}>
         {options.map((option) => (
           <option key={option} value={option}>
             {option}
           </option>
         ))}
       </select>
-    </FieldChrome>
+    </FieldShell>
   );
 }
 
-type RangeFieldProps = {
+type TextFieldProps = {
   label: string;
   tooltip: string;
-  value: number;
-  min: number;
-  max: number;
-  step: number;
-  onChange: (value: number) => void;
+  value: string;
+  disabled: boolean;
+  onChange: (value: string) => void;
 };
 
-function RangeField({ label, tooltip, value, min, max, step, onChange }: RangeFieldProps) {
+function TextField({ label, tooltip, value, disabled, onChange }: TextFieldProps) {
   return (
-    <FieldChrome label={label} tooltip={tooltip} valueText={value.toFixed(1)}>
-      <input
-        className="slider-control"
-        type="range"
-        min={min}
-        max={max}
-        step={step}
-        value={value}
-        onChange={(event) => onChange(Number(event.target.value))}
-      />
-    </FieldChrome>
+    <FieldShell label={label} tooltip={tooltip}>
+      <input className="input-control" disabled={disabled} type="text" value={value} onChange={(event) => onChange(event.target.value)} />
+    </FieldShell>
   );
 }
 
@@ -880,7 +1136,7 @@ type ToggleControlProps = {
 
 function ToggleControl({ label, tooltip, checked, disabled, onChange }: ToggleControlProps) {
   return (
-    <div className="flex items-center gap-3 rounded-full border border-[color:var(--line-strong)] bg-white/70 px-4 py-2">
+    <div className="flex items-center justify-between gap-3 rounded-[22px] border border-[color:var(--line-strong)] bg-white/72 px-4 py-3">
       <div className="flex items-center gap-2">
         <span className="text-sm font-semibold text-[color:var(--ink)]">{label}</span>
         <Tooltip content={tooltip} />
@@ -898,6 +1154,114 @@ function ToggleControl({ label, tooltip, checked, disabled, onChange }: ToggleCo
   );
 }
 
+type SplitBalanceFieldProps = {
+  totalAgents: number;
+  leftCount: number;
+  rightCount: number;
+  disabled: boolean;
+  onChange: (leftCount: number) => void;
+};
+
+function SplitBalanceField({ totalAgents, leftCount, rightCount, disabled, onChange }: SplitBalanceFieldProps) {
+  return (
+    <FieldShell
+      label="Exact Split Size"
+      tooltip="Controls the exact number of fish assigned to the left branch. The right branch updates automatically so the total always stays valid."
+      valueText={`${leftCount} left / ${rightCount} right`}
+    >
+      <div className="range-shell">
+        <div className="range-track">
+          <div className="range-safe-window" style={{ left: "28%", width: "44%" }} />
+        </div>
+        <input
+          className="slider-control"
+          disabled={disabled}
+          max={totalAgents}
+          min={0}
+          step={1}
+          type="range"
+          value={leftCount}
+          onChange={(event) => onChange(Number(event.target.value))}
+        />
+      </div>
+      <div className="mt-4 grid grid-cols-2 gap-3">
+        <PreviewMetric label="Left branch" value={`${leftCount} fish`} />
+        <PreviewMetric label="Right branch" value={`${rightCount} fish`} />
+      </div>
+    </FieldShell>
+  );
+}
+
+type CoordinateGridProps = {
+  config: AppConfig;
+  disabled: boolean;
+  onChange: (key: keyof AppConfig, value: number) => void;
+};
+
+function CoordinateGrid({ config, disabled, onChange }: CoordinateGridProps) {
+  const fields: Array<{ key: keyof AppConfig; label: string; tooltip: string }> = [
+    { key: "center_attractor_x", label: "Center X", tooltip: "Horizontal position of the aggregation target in arena pixels." },
+    { key: "center_attractor_y", label: "Center Y", tooltip: "Vertical position of the aggregation target in arena pixels." },
+    { key: "left_attractor_x", label: "Left X", tooltip: "Horizontal position of the left branch target in arena pixels." },
+    { key: "left_attractor_y", label: "Left Y", tooltip: "Vertical position of the left branch target in arena pixels." },
+    { key: "right_attractor_x", label: "Right X", tooltip: "Horizontal position of the right branch target in arena pixels." },
+    { key: "right_attractor_y", label: "Right Y", tooltip: "Vertical position of the right branch target in arena pixels." },
+  ];
+
+  return (
+    <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+      {fields.map((field) => (
+        <FieldShell key={field.key} label={field.label} tooltip={field.tooltip} valueText={`${Math.round(Number(config[field.key]))}px`}>
+          <input
+            className="input-control"
+            disabled={disabled}
+            min={0}
+            step={1}
+            type="number"
+            value={Number(config[field.key])}
+            onChange={(event) => onChange(field.key, Number(event.target.value))}
+          />
+        </FieldShell>
+      ))}
+    </div>
+  );
+}
+
+type PreviewMetricProps = {
+  label: string;
+  value: string;
+};
+
+function PreviewMetric({ label, value }: PreviewMetricProps) {
+  return (
+    <div className="metric-card">
+      <p className="text-[11px] uppercase tracking-[0.22em] text-[color:var(--ink-faint)]">{label}</p>
+      <p className="mt-2 text-lg font-semibold text-[color:var(--ink)]">{value}</p>
+    </div>
+  );
+}
+
+type PresetButtonProps = {
+  label: string;
+  description: string;
+  active: boolean;
+  disabled: boolean;
+  onClick: () => void;
+};
+
+function PresetButton({ label, description, active, disabled, onClick }: PresetButtonProps) {
+  return (
+    <button
+      className={`preset-card ${active ? "preset-card-active" : ""}`}
+      disabled={disabled}
+      onClick={onClick}
+    >
+      <p className="text-left text-sm font-semibold text-[color:var(--ink)]">{label}</p>
+      <p className="mt-2 text-left text-sm leading-6 text-[color:var(--ink-muted)]">{description}</p>
+    </button>
+  );
+}
+
 type StatTileProps = {
   label: string;
   value: string;
@@ -910,6 +1274,99 @@ function StatTile({ label, value }: StatTileProps) {
       <p className="mt-2 text-sm font-semibold text-white">{value}</p>
     </div>
   );
+}
+
+function humanizePhase(phase?: string | null): string {
+  if (!phase) {
+    return "--";
+  }
+  if (phase === "center") {
+    return "Aggregation";
+  }
+  if (phase === "stabilize") {
+    return "Stabilization";
+  }
+  if (phase === "split") {
+    return "Splitting";
+  }
+  return phase.charAt(0).toUpperCase() + phase.slice(1);
+}
+
+function humanizeJobStatus(status: string): string {
+  if (status === "queued") {
+    return "Queued";
+  }
+  if (status === "running") {
+    return "Running";
+  }
+  if (status === "stopping") {
+    return "Stopping";
+  }
+  if (status === "stopped") {
+    return "Stopped";
+  }
+  if (status === "cancelling") {
+    return "Cancelling";
+  }
+  if (status === "cancelled") {
+    return "Cancelled";
+  }
+  if (status === "completed") {
+    return "Completed";
+  }
+  if (status === "failed") {
+    return "Failed";
+  }
+  if (status === "booting") {
+    return "Booting";
+  }
+  return "Idle";
+}
+
+function formatEta(etaSeconds: number | null | undefined): string {
+  if (etaSeconds == null) {
+    return "--";
+  }
+  if (etaSeconds < 60) {
+    return `${etaSeconds.toFixed(1)}s`;
+  }
+  const minutes = Math.floor(etaSeconds / 60);
+  const seconds = Math.round(etaSeconds % 60);
+  return `${minutes}m ${seconds}s`;
+}
+
+function uniqueStrings(values: string[]): string[] {
+  const seen = new Set<string>();
+  return values.filter((value) => {
+    if (seen.has(value)) {
+      return false;
+    }
+    seen.add(value);
+    return true;
+  });
+}
+
+function statusTone(errorMessage: string | null, backendReady: boolean): string {
+  if (errorMessage) {
+    return "bg-rose-100 text-rose-700";
+  }
+  if (backendReady) {
+    return "bg-emerald-100 text-emerald-700";
+  }
+  return "bg-amber-100 text-amber-700";
+}
+
+function jobTone(status?: string | null): string {
+  if (status === "failed" || status === "cancelled") {
+    return "bg-rose-100 text-rose-700";
+  }
+  if (status === "completed" || status === "stopped") {
+    return "bg-emerald-100 text-emerald-700";
+  }
+  if (status === "running" || status === "queued" || status === "stopping" || status === "cancelling") {
+    return "bg-amber-100 text-amber-700";
+  }
+  return "bg-slate-100 text-slate-700";
 }
 
 export default App;

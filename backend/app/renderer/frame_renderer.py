@@ -56,7 +56,9 @@ class FrameRenderer:
     ) -> None:
         center = (int(round(position[0])), int(round(position[1])))
         if shape == "circle":
-            cv2.circle(frame, center, int(round(size)), color, -1, cv2.LINE_AA)
+            radius = int(round(size))
+            cv2.circle(frame, center, radius, color, -1, cv2.LINE_AA)
+            cv2.circle(frame, center, radius, (255, 255, 255), 1, cv2.LINE_AA)
             return
 
         polygon = self._rotated_polygon(shape, size, heading, position)

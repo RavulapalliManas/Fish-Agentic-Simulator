@@ -65,7 +65,7 @@ fn main() {
 
     let handle = app.handle().clone();
     app.run(move |_handle, event| {
-        if let tauri::RunEvent::Exit = event {
+        if matches!(event, tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit) {
             shutdown_backend(&handle);
         }
     });

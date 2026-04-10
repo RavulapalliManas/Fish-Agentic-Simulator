@@ -24,10 +24,11 @@ class PotentialFieldModel(ResearchBoidsModel):
         long_range_pull = normalize(centroid - agent.position, fallback=agent.direction) * target_speed - agent.velocity
 
         repel = np.zeros(2, dtype=float)
+        personal_space = max(float(config.separation_radius), float(config.minimum_agent_spacing))
         for neighbor in neighbors:
             offset = agent.position - neighbor.position
             distance = float(np.linalg.norm(offset))
-            if distance > 0.0:
+            if 0.0 < distance < personal_space:
                 repel += offset / max(distance ** 1.7, 1.0)
 
         repulsion = np.zeros(2, dtype=float)

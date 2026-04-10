@@ -34,6 +34,18 @@ class FrameState:
     metrics: dict[str, float | int | str]
 
 
+@dataclass
+class PreviewClip:
+    """Lightweight preview sequence sampled from the deterministic engine."""
+
+    phase: str
+    preview_fps: int
+    loop_duration_seconds: float
+    preview_agent_count: int
+    frames: list[FrameState]
+    warnings: list[str]
+
+
 class StimulusEngine:
     """Own the agents, model, and paradigm for deterministic fixed-step simulation."""
 
@@ -61,6 +73,7 @@ class StimulusEngine:
         self.model = build_model(self.config.model_type)
         self.paradigm.reset(self.config, self.rng)
         self.agents = self._initialize_agents()
+        self._resolve_agent_overlaps(passes=6)
         self.phase = "center"
         self.frame_index = 0
         self.time_seconds = 0.0
@@ -115,6 +128,7 @@ class StimulusEngine:
 
         self.phase = paradigm_output.phase
         self.attractors = paradigm_output.attractors
+        self._resolve_agent_overlaps()
         self.time_seconds = evaluation_time
         self.frame_index = next_frame_index
         self._update_metrics()
@@ -136,9 +150,7 @@ class StimulusEngine:
     def _initialize_agents(self) -> list[FishAgent]:
         center = self.config.center_attractor
         width, height = self.config.arena_size
-        positions = center + self.rng.normal(0.0, self.config.initial_spread, size=(self.config.number_of_agents, 2))
-        positions[:, 0] = np.clip(positions[:, 0], self.config.size + 1.0, width - self.config.size - 1.0)
-        positions[:, 1] = np.clip(positions[:, 1], self.config.size + 1.0, height - self.config.size - 1.0)
+        positions = self._initial_positions(center, width, height)
 
         headings = -np.pi / 2.0 + self.rng.normal(0.0, 0.25, size=self.config.number_of_agents)
         speed_modulation = self.rng.uniform(0.88, 1.0, size=self.config.number_of_agents)
@@ -147,6 +159,35 @@ class StimulusEngine:
             dtype=float,
         )
         return [FishAgent(index, positions[index], velocities[index]) for index in range(self.config.number_of_agents)]
+
+    def _initial_positions(self, center: np.ndarray, width: int, height: int) -> np.ndarray:
+        margin = float(self.config.size) + 1.0
+        minimum_spacing = max(self.config.minimum_agent_spacing * 0.86, float(self.config.size) * 1.55)
+        spread = max(float(self.config.initial_spread), minimum_spacing)
+        positions: list[np.ndarray] = []
+
+        for index in range(self.config.number_of_agents):
+            placed = False
+            for _ in range(96):
+                candidate = center + self.rng.normal(0.0, spread, size=2)
+                candidate[0] = np.clip(candidate[0], margin, width - margin)
+                candidate[1] = np.clip(candidate[1], margin, height - margin)
+                if all(float(np.linalg.norm(candidate - other)) >= minimum_spacing for other in positions):
+                    positions.append(candidate)
+                    placed = True
+                    break
+
+            if placed:
+                continue
+
+            fallback_angle = (2.0 * np.pi * index) / max(self.config.number_of_agents, 1)
+            fallback_radius = minimum_spacing * (1.0 + 0.18 * (index // 8))
+            candidate = center + vector_from_angle(fallback_angle) * fallback_radius
+            candidate[0] = np.clip(candidate[0], margin, width - margin)
+            candidate[1] = np.clip(candidate[1], margin, height - margin)
+            positions.append(candidate)
+
+        return np.asarray(positions, dtype=float)
 
     def run_until_time(self, target_time_seconds: float) -> FrameState:
         """Advance until the requested preview/export time and return the current frame."""
@@ -185,6 +226,60 @@ class StimulusEngine:
                             neighbors[index].append(other)
         return neighbors
 
+    def _resolve_agent_overlaps(self, passes: int = 2) -> None:
+        minimum_spacing = float(self.config.minimum_agent_spacing)
+        if minimum_spacing <= 0.0 or len(self.agents) < 2:
+            return
+
+        cell_size = max(minimum_spacing, 1.0)
+        within_group_only = self.phase == "split"
+        for _ in range(max(1, passes)):
+            grid: dict[tuple[int, int], list[int]] = {}
+            for index, agent in enumerate(self.agents):
+                cell = (int(agent.position[0] // cell_size), int(agent.position[1] // cell_size))
+                grid.setdefault(cell, []).append(index)
+
+            adjusted = False
+            for index, agent in enumerate(self.agents):
+                cell_x = int(agent.position[0] // cell_size)
+                cell_y = int(agent.position[1] // cell_size)
+                for dx in (-1, 0, 1):
+                    for dy in (-1, 0, 1):
+                        for other_index in grid.get((cell_x + dx, cell_y + dy), []):
+                            if other_index <= index:
+                                continue
+                            other = self.agents[other_index]
+                            if within_group_only and other.group != agent.group:
+                                continue
+                            offset = agent.position - other.position
+                            distance = float(np.linalg.norm(offset))
+                            if distance >= minimum_spacing:
+                                continue
+
+                            if distance < 1e-8:
+                                normal = vector_from_angle((2.0 * np.pi * (index + 1)) / max(len(self.agents), 1))
+                                distance = 1.0
+                            else:
+                                normal = offset / distance
+
+                            overlap = minimum_spacing - distance
+                            correction = normal * (overlap * 0.5)
+                            agent.position = agent.position + correction
+                            other.position = other.position - correction
+                            self._clip_agent_to_bounds(agent)
+                            self._clip_agent_to_bounds(other)
+
+                            relative_velocity = agent.velocity - other.velocity
+                            normal_speed = float(np.dot(relative_velocity, normal))
+                            if normal_speed < 0.0:
+                                impulse = normal * (normal_speed * 0.5)
+                                agent.velocity = agent.velocity - impulse
+                                other.velocity = other.velocity + impulse
+                            adjusted = True
+
+            if not adjusted:
+                break
+
     def _wall_force(self, agent: FishAgent) -> np.ndarray:
         margin = float(self.config.wall_margin)
         strength = float(self.config.wall_strength)
@@ -202,6 +297,12 @@ class StimulusEngine:
             steer[1] -= strength * (agent.position[1] - (height - margin)) / margin
 
         return steer
+
+    def _clip_agent_to_bounds(self, agent: FishAgent) -> None:
+        width, height = self.config.arena_size
+        margin = float(self.config.size) + 1.0
+        agent.position[0] = float(np.clip(agent.position[0], margin, float(width) - margin))
+        agent.position[1] = float(np.clip(agent.position[1], margin, float(height) - margin))
 
     def _update_metrics(self) -> None:
         if not self.agents:
@@ -242,6 +343,27 @@ def sample_preview_state(config: StimulusConfig, phase: str) -> FrameState:
     return engine.run_until_time(_preview_time_for_phase(engine.config, normalized_phase))
 
 
+def build_preview_clip(config: StimulusConfig, phase: str) -> PreviewClip:
+    """Return a short deterministic clip for the requested phase."""
+    normalized_phase = phase if phase in {"center", "stabilize", "split"} else "split"
+    preview_config = _preview_config(config)
+    preview_engine = StimulusEngine(preview_config)
+    start_time, end_time = _preview_window(preview_config, normalized_phase)
+
+    sample_count = max(18, int(round((end_time - start_time) * float(preview_config.fps))) + 1)
+    times = np.linspace(start_time, end_time, num=sample_count, endpoint=True)
+    frames = [preview_engine.run_until_time(float(time_value)) for time_value in times]
+
+    return PreviewClip(
+        phase=normalized_phase,
+        preview_fps=preview_config.fps,
+        loop_duration_seconds=max(preview_config.dt, end_time - start_time),
+        preview_agent_count=preview_config.number_of_agents,
+        frames=frames,
+        warnings=config.copy().validate().sanity_warnings(),
+    )
+
+
 def _preview_time_for_phase(config: StimulusConfig, phase: str) -> float:
     if phase == "center":
         return max(config.dt, config.time_in_center * 0.55)
@@ -252,3 +374,61 @@ def _preview_time_for_phase(config: StimulusConfig, phase: str) -> float:
 
     split_window = max(config.video_duration - config.time_to_split, config.dt)
     return min(config.video_duration - config.dt, config.time_to_split + min(1.6, split_window * 0.72))
+
+
+def _preview_config(config: StimulusConfig) -> StimulusConfig:
+    preview_config = config.copy().validate()
+    preview_total_agents = _preview_agent_count(preview_config.number_of_agents)
+    preview_left, preview_right = _scaled_split_counts(preview_config, preview_total_agents)
+
+    preview_config.number_of_agents = preview_total_agents
+    preview_config.left_count = preview_left
+    preview_config.right_count = preview_right
+    preview_config.fps = int(max(16, min(preview_config.fps, 24)))
+    preview_config.video_duration = max(preview_config.video_duration, preview_config.time_to_split + 2.0)
+    preview_config.save_metadata_json = False
+    return preview_config.validate()
+
+
+def _preview_agent_count(total_agents: int) -> int:
+    if total_agents < 20:
+        return total_agents
+    return int(np.clip(total_agents, 20, 50))
+
+
+def _scaled_split_counts(config: StimulusConfig, total_agents: int) -> tuple[int, int]:
+    if total_agents == config.number_of_agents:
+        return config.left_count, config.right_count
+
+    if config.number_of_agents <= 0:
+        return total_agents // 2, total_agents - (total_agents // 2)
+
+    left_ratio = config.left_count / float(config.number_of_agents)
+    left_count = int(round(total_agents * left_ratio))
+    left_count = int(np.clip(left_count, 0, total_agents))
+
+    if config.left_count > 0 and config.right_count > 0 and total_agents >= 2:
+        left_count = int(np.clip(left_count, 1, total_agents - 1))
+
+    return left_count, total_agents - left_count
+
+
+def _preview_window(config: StimulusConfig, phase: str) -> tuple[float, float]:
+    clip_duration = 4.0
+    preview_floor = max(config.dt * 6.0, 1.2)
+
+    if phase == "center":
+        start_time = 0.0
+        phase_end = max(start_time + config.dt, config.time_in_center - config.dt)
+        end_time = min(phase_end, max(preview_floor, min(phase_end, clip_duration)))
+        return start_time, max(start_time + config.dt, end_time)
+
+    if phase == "stabilize":
+        start_time = max(config.time_in_center, config.dt)
+        phase_end = max(start_time + config.dt, config.time_to_split - config.dt)
+        end_time = min(phase_end, max(start_time + preview_floor, min(phase_end, start_time + clip_duration)))
+        return start_time, max(start_time + config.dt, end_time)
+
+    start_time = max(config.time_to_split + config.dt, config.dt)
+    end_time = min(config.video_duration - config.dt, max(start_time + preview_floor, min(config.video_duration, start_time + clip_duration)))
+    return start_time, max(start_time + config.dt, end_time)
