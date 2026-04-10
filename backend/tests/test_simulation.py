@@ -18,6 +18,12 @@ from utils.config import StimulusConfig  # noqa: E402
 
 
 class StimulusEngineTests(unittest.TestCase):
+    def test_config_supports_three_minute_duration(self) -> None:
+        config = StimulusConfig(video_duration=180.0, time_in_center=30.0, time_to_split=110.0)
+        self.assertEqual(config.video_duration, 180.0)
+        self.assertEqual(config.time_in_center, 30.0)
+        self.assertEqual(config.time_to_split, 110.0)
+
     def test_config_requires_exact_split_counts(self) -> None:
         with self.assertRaises(ValueError):
             StimulusConfig(number_of_agents=10, left_count=4, right_count=5)

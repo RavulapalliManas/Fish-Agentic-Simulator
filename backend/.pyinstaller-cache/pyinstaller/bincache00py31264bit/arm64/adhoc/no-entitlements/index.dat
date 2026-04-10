@@ -317,6 +317,11 @@
                                          b'd\x1f4\xea\xfet\xad\x9b'),
  'cv2/cv2.abi3.so': bytearray(b'\x01\xe8\xc0\\rC\xf5\x19x\x93"\xb3\xac\x08|\x10'
                               b'lJ\xf0\x19'),
+ 'imageio_ffmpeg/binaries/ffmpeg-macos-aarch64-v7.1': bytearray(b'\x9d`m+'
+                                                                b'^\x87\x89\xeb'
+                                                                b'\xf8i\xf9\xde'
+                                                                b'\x12T>\x92'
+                                                                b'G~\xf1A'),
  'numpy/_core/_multiarray_tests.cpython-312-darwin.so': bytearray(b'+\x90)\xac'
                                                                   b'\\\xb6\xd5\x7f'
                                                                   b'\xd5\xdfys'

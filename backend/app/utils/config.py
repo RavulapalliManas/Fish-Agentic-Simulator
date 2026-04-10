@@ -36,7 +36,7 @@ class RecommendedRange:
 class StimulusConfig:
     """User-controlled parameters for the deterministic stimulus generator."""
 
-    video_duration: float = 10.0
+    video_duration: float = 90.0
     fps: int = 60
     output_width: int = 1280
     output_height: int = 720
@@ -165,7 +165,7 @@ class StimulusConfig:
 
     def validate(self) -> "StimulusConfig":
         """Normalize the configuration so it is safe to simulate and render."""
-        self.video_duration = clamp(float(self.video_duration), 0.1, 60.0)
+        self.video_duration = clamp(float(self.video_duration), 0.1, 180.0)
         self.fps = int(clamp(float(self.fps), 1.0, 120.0))
         self.output_width = int(clamp(float(self.output_width), 160.0, 3840.0))
         self.output_height = int(clamp(float(self.output_height), 120.0, 2160.0))
@@ -219,17 +219,18 @@ class StimulusConfig:
                 warnings.append(range_info.warning)
 
         stabilize_window = float(self.time_to_split - self.time_in_center)
-        if stabilize_window < 0.75:
+        minimum_stabilization_window = max(5.0, self.video_duration * 0.08)
+        if stabilize_window < minimum_stabilization_window:
             warnings.append(
                 "Stabilization time is very short, so the shoal may begin splitting before the aggregation phase looks settled."
             )
-        elif stabilize_window > 5.0:
+        elif stabilize_window > max(40.0, self.video_duration * 0.4):
             warnings.append(
                 "Stabilization time is unusually long, which can make the split feel delayed and less interpretable."
             )
 
         split_window = float(self.video_duration - self.time_to_split)
-        if split_window < 1.5:
+        if split_window < max(10.0, self.video_duration * 0.12):
             warnings.append(
                 "The post-split observation window is short; increase video duration or move the split earlier to show stable branch formation."
             )
@@ -251,6 +252,10 @@ class StimulusConfig:
     def recommended_ranges(self) -> dict[str, RecommendedRange]:
         """Recommended values for interpretable, biologically plausible stimuli."""
         cluster_max = min(float(self.output_width), float(self.output_height)) * 0.16
+        aggregation_min = max(1.5, float(self.video_duration) * 0.15)
+        aggregation_max = max(aggregation_min + 1.0, float(self.video_duration) * 0.4)
+        split_min = max(aggregation_min + 5.0, float(self.video_duration) * 0.45)
+        split_max = max(split_min + 5.0, float(self.video_duration) * 0.85)
         return {
             "number_of_agents": RecommendedRange(
                 minimum=16.0,
@@ -313,14 +318,19 @@ class StimulusConfig:
                 warning="Rotation strength is high enough to reintroduce circling around attractors.",
             ),
             "time_in_center": RecommendedRange(
-                minimum=1.5,
-                maximum=4.0,
+                minimum=aggregation_min,
+                maximum=aggregation_max,
                 warning="Aggregation time is outside the recommended range and may make convergence feel rushed or overly prolonged.",
             ),
+            "time_to_split": RecommendedRange(
+                minimum=split_min,
+                maximum=min(float(self.video_duration) - 5.0, split_max),
+                warning="Split timing is outside the recommended range and may leave too little time for stabilization or too little time to observe the final branches.",
+            ),
             "video_duration": RecommendedRange(
-                minimum=6.0,
-                maximum=16.0,
-                warning="Video duration is outside the recommended range and may be too brief for interpretation or unnecessarily long for stimulus delivery.",
+                minimum=60.0,
+                maximum=180.0,
+                warning="Video duration is outside the recommended 1-3 minute range for this experiment workflow.",
             ),
             "fps": RecommendedRange(
                 minimum=24.0,

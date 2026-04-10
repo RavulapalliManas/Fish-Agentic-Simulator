@@ -346,6 +346,40 @@ select {
   color: #8c4d37;
 }
 
+.schedule-track {
+  display: flex;
+  overflow: hidden;
+  border-radius: 999px;
+  border: 1px solid var(--line-strong);
+  background: rgba(255, 255, 255, 0.78);
+  min-height: 2.9rem;
+}
+
+.schedule-segment {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 3.2rem;
+  padding: 0.75rem 0.4rem;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink);
+}
+
+.schedule-aggregation {
+  background: linear-gradient(135deg, rgba(19, 132, 122, 0.2), rgba(19, 132, 122, 0.34));
+}
+
+.schedule-stabilization {
+  background: linear-gradient(135deg, rgba(22, 38, 51, 0.09), rgba(22, 38, 51, 0.18));
+}
+
+.schedule-split {
+  background: linear-gradient(135deg, rgba(219, 110, 63, 0.18), rgba(219, 110, 63, 0.34));
+}
+
 @keyframes previewPulse {
   0%,
   100% {

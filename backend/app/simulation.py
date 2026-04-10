@@ -386,6 +386,12 @@ def _preview_config(config: StimulusConfig) -> StimulusConfig:
     preview_config.right_count = preview_right
     preview_config.fps = int(max(16, min(preview_config.fps, 24)))
     preview_config.video_duration = max(preview_config.video_duration, preview_config.time_to_split + 2.0)
+    preview_duration_cap = 18.0
+    if preview_config.video_duration > preview_duration_cap:
+        schedule_scale = preview_duration_cap / float(preview_config.video_duration)
+        preview_config.time_in_center *= schedule_scale
+        preview_config.time_to_split *= schedule_scale
+        preview_config.video_duration = preview_duration_cap
     preview_config.save_metadata_json = False
     return preview_config.validate()
 

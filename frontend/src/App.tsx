@@ -40,6 +40,8 @@ import { getRuntimeInfo, waitForBackend, type RuntimeInfo } from "./lib/runtime"
 
 const ACTIVE_JOB_STATUSES = new Set(["queued", "running", "stopping", "cancelling"]);
 const TERMINAL_VIDEO_STATUSES = new Set(["completed", "stopped"]);
+const MIN_STABILIZATION_WINDOW_SECONDS = 5;
+const MIN_SPLIT_OBSERVATION_SECONDS = 10;
 
 function App() {
   const [runtime, setRuntime] = useState<RuntimeInfo | null>(null);
@@ -250,6 +252,7 @@ function App() {
       { label: "Motion model", value: config.model_type },
       { label: "Shoal plan", value: `${config.number_of_agents} fish` },
       { label: "Split plan", value: `${config.left_count} left / ${config.right_count} right` },
+      { label: "Schedule", value: `${formatClock(config.time_in_center)} / ${formatClock(config.time_to_split)} / ${formatClock(config.video_duration)}` },
       { label: "Layout", value: currentLayoutLabel },
       { label: "Preset", value: currentBehaviorPresetLabel },
       { label: "Arena", value: `${config.output_width} x ${config.output_height}` },
@@ -262,11 +265,11 @@ function App() {
       (warning): warning is string => Boolean(warning),
     );
 
-    if (config.time_to_split - config.time_in_center < 0.75) {
+    if (config.time_to_split - config.time_in_center < Math.max(MIN_STABILIZATION_WINDOW_SECONDS, config.video_duration * 0.08)) {
       warnings.push("Stabilization time is very short, so the shoal may split before it looks settled.");
     }
 
-    if (config.video_duration - config.time_to_split < 1.5) {
+    if (config.video_duration - config.time_to_split < Math.max(MIN_SPLIT_OBSERVATION_SECONDS, config.video_duration * 0.12)) {
       warnings.push("The post-split observation window is short; consider extending the duration or starting the split earlier.");
     }
 
@@ -326,8 +329,12 @@ function App() {
   const handleTimeInCenterChange = (nextValue: number) => {
     setBehaviorPresetId("custom");
     setConfig((current) => {
-      const timeInCenter = Math.max(0.5, nextValue);
-      const minimumSplitTime = timeInCenter + 0.6;
+      const maxAggregationEnd = Math.max(
+        5,
+        current.video_duration - (MIN_STABILIZATION_WINDOW_SECONDS + MIN_SPLIT_OBSERVATION_SECONDS),
+      );
+      const timeInCenter = Math.min(maxAggregationEnd, Math.max(5, nextValue));
+      const minimumSplitTime = timeInCenter + MIN_STABILIZATION_WINDOW_SECONDS;
       return {
         ...current,
         time_in_center: timeInCenter,
@@ -338,19 +345,31 @@ function App() {
 
   const handleTimeToSplitChange = (nextValue: number) => {
     setBehaviorPresetId("custom");
-    setConfig((current) => ({
-      ...current,
-      time_to_split: Math.max(current.time_in_center + 0.6, nextValue),
-    }));
+    setConfig((current) => {
+      const minimumSplitTime = current.time_in_center + MIN_STABILIZATION_WINDOW_SECONDS;
+      const maximumSplitTime = Math.max(minimumSplitTime, current.video_duration - MIN_SPLIT_OBSERVATION_SECONDS);
+      return {
+        ...current,
+        time_to_split: Math.min(maximumSplitTime, Math.max(minimumSplitTime, nextValue)),
+      };
+    });
   };
 
   const handleVideoDurationChange = (nextValue: number) => {
     setConfig((current) => {
-      const videoDuration = Math.max(3, nextValue);
+      const videoDuration = Math.max(60, Math.min(180, nextValue));
+      const maxAggregationEnd = Math.max(
+        5,
+        videoDuration - (MIN_STABILIZATION_WINDOW_SECONDS + MIN_SPLIT_OBSERVATION_SECONDS),
+      );
+      const timeInCenter = Math.min(current.time_in_center, maxAggregationEnd);
+      const minimumSplitTime = timeInCenter + MIN_STABILIZATION_WINDOW_SECONDS;
+      const maximumSplitTime = Math.max(minimumSplitTime, videoDuration - MIN_SPLIT_OBSERVATION_SECONDS);
       return {
         ...current,
         video_duration: videoDuration,
-        time_to_split: Math.min(current.time_to_split, Math.max(current.time_in_center + 0.6, videoDuration - 0.8)),
+        time_in_center: timeInCenter,
+        time_to_split: Math.min(maximumSplitTime, Math.max(minimumSplitTime, current.time_to_split)),
       };
     });
   };
@@ -484,42 +503,59 @@ function App() {
       return null;
     }
 
-    const value = Number(config[spec.key]);
+    let resolvedSpec = spec;
+    if (spec.key === "time_in_center") {
+      resolvedSpec = {
+        ...spec,
+        max: Math.max(5, Math.floor(config.video_duration - (MIN_STABILIZATION_WINDOW_SECONDS + MIN_SPLIT_OBSERVATION_SECONDS))),
+      };
+    } else if (spec.key === "time_to_split") {
+      resolvedSpec = {
+        ...spec,
+        min: Math.ceil(config.time_in_center + MIN_STABILIZATION_WINDOW_SECONDS),
+        max: Math.max(
+          Math.ceil(config.time_in_center + MIN_STABILIZATION_WINDOW_SECONDS),
+          Math.floor(config.video_duration - MIN_SPLIT_OBSERVATION_SECONDS),
+        ),
+      };
+    }
+
+    const value = Number(config[resolvedSpec.key]);
     const onChange = (nextValue: number) => {
-      if (spec.key === "number_of_agents") {
+      if (resolvedSpec.key === "number_of_agents") {
         handleAgentCountChange(nextValue);
         return;
       }
-      if (spec.key === "time_in_center") {
+      if (resolvedSpec.key === "time_in_center") {
         handleTimeInCenterChange(nextValue);
         return;
       }
-      if (spec.key === "time_to_split") {
+      if (resolvedSpec.key === "time_to_split") {
         handleTimeToSplitChange(nextValue);
         return;
       }
-      if (spec.key === "video_duration") {
+      if (resolvedSpec.key === "video_duration") {
         handleVideoDurationChange(nextValue);
         return;
       }
-      if (spec.key === "output_width") {
+      if (resolvedSpec.key === "output_width") {
         handleResolutionChange("width", nextValue);
         return;
       }
-      if (spec.key === "output_height") {
+      if (resolvedSpec.key === "output_height") {
         handleResolutionChange("height", nextValue);
         return;
       }
-      updateConfigValue(spec.key, nextValue as AppConfig[typeof spec.key], {
-        markBehaviorCustom: spec.group !== "rendering" && spec.group !== "environment",
+      updateConfigValue(resolvedSpec.key, nextValue as AppConfig[typeof resolvedSpec.key], {
+        markBehaviorCustom: resolvedSpec.group !== "rendering" && resolvedSpec.group !== "environment",
       });
     };
 
     return (
       <ParameterSlider
-        key={spec.key}
-        disabled={spec.group === "environment" ? environmentLocked : controlsLocked}
-        spec={spec}
+        key={resolvedSpec.key}
+        disabled={resolvedSpec.group === "environment" ? environmentLocked : controlsLocked}
+        spec={resolvedSpec}
         value={value}
         onChange={onChange}
       />
@@ -782,6 +818,15 @@ function App() {
                 disabled={controlsLocked}
                 title="Splitting Control"
               >
+                <PhaseScheduleCard
+                  aggregationEnd={config.time_in_center}
+                  disabled={controlsLocked}
+                  splitStart={config.time_to_split}
+                  videoEnd={config.video_duration}
+                  onAggregationEndChange={handleTimeInCenterChange}
+                  onSplitStartChange={handleTimeToSplitChange}
+                  onVideoEndChange={handleVideoDurationChange}
+                />
                 <SplitBalanceField
                   disabled={controlsLocked}
                   leftCount={config.left_count}
@@ -790,7 +835,9 @@ function App() {
                   onChange={handleLeftCountChange}
                 />
                 <div className="mt-4 grid gap-4">
-                  {PARAMETER_SPECS.filter((spec) => spec.group === "splitting-control").map(renderParameterField)}
+                  {PARAMETER_SPECS
+                    .filter((spec) => spec.group === "splitting-control" && !["time_in_center", "time_to_split"].includes(spec.key))
+                    .map(renderParameterField)}
                 </div>
               </SectionPanel>
 
@@ -815,7 +862,9 @@ function App() {
                 title="Rendering"
               >
                 <div className="grid gap-4">
-                  {PARAMETER_SPECS.filter((spec) => spec.group === "rendering").map(renderParameterField)}
+                  {PARAMETER_SPECS
+                    .filter((spec) => spec.group === "rendering" && spec.key !== "video_duration")
+                    .map(renderParameterField)}
                   <SelectField
                     disabled={controlsLocked}
                     label="Marker Shape"
@@ -1192,6 +1241,121 @@ function SplitBalanceField({ totalAgents, leftCount, rightCount, disabled, onCha
   );
 }
 
+type PhaseScheduleCardProps = {
+  aggregationEnd: number;
+  splitStart: number;
+  videoEnd: number;
+  disabled: boolean;
+  onAggregationEndChange: (value: number) => void;
+  onSplitStartChange: (value: number) => void;
+  onVideoEndChange: (value: number) => void;
+};
+
+function PhaseScheduleCard({
+  aggregationEnd,
+  splitStart,
+  videoEnd,
+  disabled,
+  onAggregationEndChange,
+  onSplitStartChange,
+  onVideoEndChange,
+}: PhaseScheduleCardProps) {
+  const stabilizationWindow = Math.max(0, splitStart - aggregationEnd);
+  const splitWindow = Math.max(0, videoEnd - splitStart);
+  const aggregationWidth = `${(aggregationEnd / Math.max(videoEnd, 1)) * 100}%`;
+  const stabilizationWidth = `${(stabilizationWindow / Math.max(videoEnd, 1)) * 100}%`;
+  const splitWidth = `${(splitWindow / Math.max(videoEnd, 1)) * 100}%`;
+
+  return (
+    <div className="panel-soft">
+      <LabelRow
+        label="Phase Schedule"
+        tooltip="Choose the exact timestamps for when aggregation ends, when splitting begins, and when the video ends."
+      />
+      <div className="schedule-track mt-4">
+        <div className="schedule-segment schedule-aggregation" style={{ width: aggregationWidth }}>
+          Aggregation
+        </div>
+        <div className="schedule-segment schedule-stabilization" style={{ width: stabilizationWidth }}>
+          Stabilization
+        </div>
+        <div className="schedule-segment schedule-split" style={{ width: splitWidth }}>
+          Split
+        </div>
+      </div>
+      <div className="mt-3 grid gap-3 md:grid-cols-3">
+        <ScheduleInput
+          disabled={disabled}
+          label="Aggregation Ends"
+          max={Math.max(5, Math.floor(videoEnd - (MIN_STABILIZATION_WINDOW_SECONDS + MIN_SPLIT_OBSERVATION_SECONDS)))}
+          min={5}
+          value={aggregationEnd}
+          onChange={onAggregationEndChange}
+        />
+        <ScheduleInput
+          disabled={disabled}
+          label="Split Starts"
+          max={Math.max(
+            Math.ceil(aggregationEnd + MIN_STABILIZATION_WINDOW_SECONDS),
+            Math.floor(videoEnd - MIN_SPLIT_OBSERVATION_SECONDS),
+          )}
+          min={Math.ceil(aggregationEnd + MIN_STABILIZATION_WINDOW_SECONDS)}
+          value={splitStart}
+          onChange={onSplitStartChange}
+        />
+        <ScheduleInput
+          disabled={disabled}
+          label="Video Ends"
+          max={180}
+          min={60}
+          value={videoEnd}
+          onChange={onVideoEndChange}
+        />
+      </div>
+      <div className="mt-4 grid gap-3 md:grid-cols-3">
+        <PreviewMetric label="Aggregation" value={formatClock(aggregationEnd)} />
+        <PreviewMetric label="Stabilization" value={formatClock(stabilizationWindow)} />
+        <PreviewMetric label="Split Observation" value={formatClock(splitWindow)} />
+      </div>
+    </div>
+  );
+}
+
+type ScheduleInputProps = {
+  label: string;
+  value: number;
+  min: number;
+  max: number;
+  disabled: boolean;
+  onChange: (value: number) => void;
+};
+
+function ScheduleInput({ label, value, min, max, disabled, onChange }: ScheduleInputProps) {
+  return (
+    <div className="rounded-[20px] border border-[color:var(--line)] bg-white/76 px-4 py-3">
+      <p className="text-[11px] uppercase tracking-[0.22em] text-[color:var(--ink-faint)]">{label}</p>
+      <div className="mt-3 flex items-center gap-3">
+        <input
+          className="input-control"
+          disabled={disabled}
+          max={max}
+          min={min}
+          step={1}
+          type="number"
+          value={Math.round(value)}
+          onChange={(event) => {
+            const nextValue = Number(event.target.value);
+            if (Number.isFinite(nextValue)) {
+              onChange(nextValue);
+            }
+          }}
+        />
+        <span className="text-sm font-semibold text-[color:var(--ink-muted)]">sec</span>
+      </div>
+    </div>
+  );
+}
+
 type CoordinateGridProps = {
   config: AppConfig;
   disabled: boolean;
@@ -1333,6 +1497,13 @@ function formatEta(etaSeconds: number | null | undefined): string {
   const minutes = Math.floor(etaSeconds / 60);
   const seconds = Math.round(etaSeconds % 60);
   return `${minutes}m ${seconds}s`;
+}
+
+function formatClock(seconds: number): string {
+  const clamped = Math.max(0, Math.round(seconds));
+  const minutes = Math.floor(clamped / 60);
+  const remainder = clamped % 60;
+  return `${String(minutes).padStart(2, "0")}:${String(remainder).padStart(2, "0")}`;
 }
 
 function uniqueStrings(values: string[]): string[] {
