@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef } from "react";
 
 import type { PreviewResponse } from "../lib/api";
 import type { AppConfig, AttractorKey } from "../lib/defaults";
@@ -14,11 +14,16 @@ type StimulusPreviewProps = {
 };
 
 const ATTRACTOR_STYLES: Record<AttractorKey, { label: string; fill: string; stroke: string }> = {
-  center: { label: "Aggregation", fill: "rgba(19, 132, 122, 0.16)", stroke: "#13847A" },
-  left: { label: "Left branch", fill: "rgba(26, 118, 255, 0.16)", stroke: "#1A76FF" },
-  right: { label: "Right branch", fill: "rgba(219, 110, 63, 0.18)", stroke: "#DB6E3F" },
+  center: { label: "Aggregation", fill: "rgba(37, 99, 235, 0.12)", stroke: "#1d4ed8" },
+  left: { label: "Left branch", fill: "rgba(37, 99, 235, 0.12)", stroke: "#2563eb" },
+  right: { label: "Right branch", fill: "rgba(210, 105, 63, 0.14)", stroke: "#d2693f" },
 };
 
+/**
+ * Canvas-based arena preview. Rendering is driven by requestAnimationFrame and
+ * reads the latest props from a ref, so playback advances without triggering a
+ * React re-render per frame. This keeps the preview smooth on weak hardware.
+ */
 function StimulusPreview({
   config,
   preview,
@@ -28,161 +33,217 @@ function StimulusPreview({
   selectedAttractor,
   onPlaceAttractor,
 }: StimulusPreviewProps) {
-  const svgRef = useRef<SVGSVGElement | null>(null);
-  const [frameIndex, setFrameIndex] = useState(0);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const timeBadgeRef = useRef<HTMLSpanElement | null>(null);
 
-  useEffect(() => {
-    setFrameIndex(0);
-  }, [preview]);
+  // Latest props, read by the animation loop without re-subscribing each frame.
+  const stateRef = useRef({ config, preview, designMode, ghostAgentsEnabled, playbackEnabled, selectedAttractor });
+  stateRef.current = { config, preview, designMode, ghostAgentsEnabled, playbackEnabled, selectedAttractor };
 
-  useEffect(() => {
-    if (!preview || designMode || !playbackEnabled || preview.frames.length <= 1) {
+  const frameRef = useRef(0);
+
+  const paint = useCallback((frameIndex: number) => {
+    const canvas = canvasRef.current;
+    if (!canvas) {
+      return;
+    }
+    const ctx = canvas.getContext("2d");
+    if (!ctx) {
       return;
     }
 
-    const intervalMs = Math.max(40, Math.round(1000 / Math.max(preview.preview_fps, 1)));
-    const handle = window.setInterval(() => {
-      setFrameIndex((current) => (current + 1) % preview.frames.length);
-    }, intervalMs);
+    const { config: cfg, preview: pv, designMode: design, ghostAgentsEnabled: ghosts, selectedAttractor: selected } =
+      stateRef.current;
 
-    return () => window.clearInterval(handle);
-  }, [designMode, playbackEnabled, preview]);
-
-  const activeFrame = useMemo(() => {
-    if (!preview || preview.frames.length === 0) {
-      return null;
+    const arenaW = Math.max(1, cfg.output_width);
+    const arenaH = Math.max(1, cfg.output_height);
+    const cssW = canvas.clientWidth;
+    const cssH = canvas.clientHeight;
+    if (cssW === 0 || cssH === 0) {
+      return;
     }
-    if (designMode || !playbackEnabled) {
-      return preview.frames[preview.frames.length - 1];
-    }
-    return preview.frames[Math.min(frameIndex, preview.frames.length - 1)];
-  }, [designMode, frameIndex, playbackEnabled, preview]);
 
-  const attractors = useMemo(
-    () => ({
+    const dpr = window.devicePixelRatio || 1;
+    const pixelW = Math.round(cssW * dpr);
+    const pixelH = Math.round(cssH * dpr);
+    if (canvas.width !== pixelW || canvas.height !== pixelH) {
+      canvas.width = pixelW;
+      canvas.height = pixelH;
+    }
+
+    // Map arena coordinates straight to displayed pixels (container matches arena
+    // aspect ratio, so scaling is uniform and click mapping stays exact).
+    ctx.setTransform((dpr * cssW) / arenaW, 0, 0, (dpr * cssH) / arenaH, 0, 0);
+    const unit = arenaW / cssW; // ~1 displayed pixel in arena units, for hairlines
+
+    // Background + grid.
+    ctx.fillStyle = cfg.background_color || "#ffffff";
+    ctx.fillRect(0, 0, arenaW, arenaH);
+
+    ctx.lineWidth = unit;
+    ctx.strokeStyle = "rgba(24, 50, 68, 0.06)";
+    ctx.beginPath();
+    for (let x = 0; x <= arenaW; x += 64) {
+      ctx.moveTo(x, 0);
+      ctx.lineTo(x, arenaH);
+    }
+    for (let y = 0; y <= arenaH; y += 64) {
+      ctx.moveTo(0, y);
+      ctx.lineTo(arenaW, y);
+    }
+    ctx.stroke();
+
+    const attractors: Record<AttractorKey, { x: number; y: number }> = {
       center: {
-        x: preview?.attractors.center?.x ?? config.center_attractor_x,
-        y: preview?.attractors.center?.y ?? config.center_attractor_y,
+        x: pv?.attractors.center?.x ?? cfg.center_attractor_x,
+        y: pv?.attractors.center?.y ?? cfg.center_attractor_y,
       },
       left: {
-        x: preview?.attractors.left?.x ?? config.left_attractor_x,
-        y: preview?.attractors.left?.y ?? config.left_attractor_y,
+        x: pv?.attractors.left?.x ?? cfg.left_attractor_x,
+        y: pv?.attractors.left?.y ?? cfg.left_attractor_y,
       },
       right: {
-        x: preview?.attractors.right?.x ?? config.right_attractor_x,
-        y: preview?.attractors.right?.y ?? config.right_attractor_y,
+        x: pv?.attractors.right?.x ?? cfg.right_attractor_x,
+        y: pv?.attractors.right?.y ?? cfg.right_attractor_y,
       },
-    }),
-    [config, preview],
-  );
+    };
 
-  const handlePointerDown = (event: React.PointerEvent<SVGSVGElement>) => {
-    if (!designMode || !svgRef.current) {
+    (Object.keys(attractors) as AttractorKey[]).forEach((key) => {
+      const point = attractors[key];
+      const style = ATTRACTOR_STYLES[key];
+      const isSelected = design && selected === key;
+
+      ctx.beginPath();
+      ctx.arc(point.x, point.y, cfg.target_cluster_radius, 0, Math.PI * 2);
+      ctx.fillStyle = style.fill;
+      ctx.fill();
+      if (isSelected) {
+        ctx.lineWidth = 2.5 * unit;
+        ctx.strokeStyle = style.stroke;
+        ctx.setLineDash([10, 10]);
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
+
+      ctx.beginPath();
+      ctx.arc(point.x, point.y, isSelected ? 11 : 9, 0, Math.PI * 2);
+      ctx.fillStyle = isSelected ? style.stroke : style.fill;
+      ctx.fill();
+      ctx.lineWidth = 2 * unit;
+      ctx.strokeStyle = "#ffffff";
+      ctx.stroke();
+
+      ctx.fillStyle = style.stroke;
+      ctx.font = `700 14px ${'"Inter Variable", system-ui, sans-serif'}`;
+      ctx.textAlign = "center";
+      ctx.fillText(style.label, point.x, point.y - cfg.target_cluster_radius - 12);
+    });
+
+    // Agents.
+    const frames = pv?.frames ?? [];
+    const frame = frames.length > 0 ? frames[Math.min(frameIndex, frames.length - 1)] : null;
+    if (ghosts && frame) {
+      const radius = Math.max(4, cfg.size * 0.88);
+      ctx.lineWidth = 0.8 * unit;
+      ctx.strokeStyle = "rgba(255, 255, 255, 0.72)";
+      for (const agent of frame.agents) {
+        ctx.save();
+        ctx.translate(agent.x, agent.y);
+        ctx.rotate(agent.heading);
+        ctx.fillStyle = groupColor(agent.group, pv?.phase ?? "center");
+        ctx.beginPath();
+        if (cfg.shape === "circle") {
+          ctx.arc(0, 0, radius, 0, Math.PI * 2);
+        } else {
+          tracePath(ctx, cfg.shape, cfg.size * 0.92);
+        }
+        ctx.fill();
+        ctx.stroke();
+        ctx.restore();
+      }
+    }
+
+    if (timeBadgeRef.current) {
+      timeBadgeRef.current.textContent = frame ? `${frame.time_seconds.toFixed(1)}s` : "--";
+    }
+  }, []);
+
+  // Draw on any prop change; run a rAF loop only while actively playing.
+  useEffect(() => {
+    const frames = preview?.frames ?? [];
+    const animating = Boolean(preview) && !designMode && playbackEnabled && frames.length > 1;
+
+    if (!animating) {
+      frameRef.current = Math.max(0, frames.length - 1);
+      paint(frameRef.current);
       return;
     }
-    const rect = svgRef.current.getBoundingClientRect();
+
+    const fps = Math.max(1, preview?.preview_fps ?? 24);
+    let raf = 0;
+    let start = 0;
+
+    const tick = (timestamp: number) => {
+      if (start === 0) {
+        start = timestamp;
+      }
+      const elapsed = (timestamp - start) / 1000;
+      frameRef.current = Math.floor(elapsed * fps) % frames.length;
+      paint(frameRef.current);
+      raf = window.requestAnimationFrame(tick);
+    };
+
+    raf = window.requestAnimationFrame(tick);
+    return () => window.cancelAnimationFrame(raf);
+  }, [config, preview, designMode, ghostAgentsEnabled, playbackEnabled, selectedAttractor, paint]);
+
+  // Redraw on container resize.
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || typeof ResizeObserver === "undefined") {
+      return;
+    }
+    const observer = new ResizeObserver(() => paint(frameRef.current));
+    observer.observe(canvas);
+    return () => observer.disconnect();
+  }, [paint]);
+
+  const handlePointerDown = (event: React.PointerEvent<HTMLCanvasElement>) => {
+    if (!designMode || !canvasRef.current) {
+      return;
+    }
+    const rect = canvasRef.current.getBoundingClientRect();
     const x = ((event.clientX - rect.left) / rect.width) * config.output_width;
     const y = ((event.clientY - rect.top) / rect.height) * config.output_height;
     onPlaceAttractor({ x, y });
   };
 
   return (
-    <div className="preview-shell relative overflow-hidden rounded-[34px] border border-[color:var(--line-strong)] bg-[color:var(--panel-strong)]">
-      <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top,rgba(19,132,122,0.16),transparent_42%),radial-gradient(circle_at_bottom_right,rgba(219,110,63,0.18),transparent_38%)]" />
-      <svg
-        ref={svgRef}
-        className={`relative z-10 aspect-[16/10] w-full ${designMode ? "cursor-crosshair" : ""}`}
-        viewBox={`0 0 ${config.output_width} ${config.output_height}`}
+    <div className="preview-shell relative">
+      <canvas
+        ref={canvasRef}
+        className={`block w-full ${designMode ? "cursor-crosshair" : ""}`}
+        style={{ aspectRatio: `${config.output_width} / ${config.output_height}` }}
         onPointerDown={handlePointerDown}
-      >
-        <defs>
-          <pattern id="preview-grid" width="64" height="64" patternUnits="userSpaceOnUse">
-            <path d="M 64 0 L 0 0 0 64" fill="none" stroke="rgba(24,50,68,0.08)" strokeWidth="1" />
-          </pattern>
-        </defs>
+      />
 
-        <rect fill={config.background_color} height={config.output_height} width={config.output_width} />
-        <rect fill="url(#preview-grid)" height={config.output_height} width={config.output_width} />
-
-        {(Object.entries(attractors) as Array<[AttractorKey, { x: number; y: number }]>).map(([key, point]) => {
-          const style = ATTRACTOR_STYLES[key];
-          const selected = designMode && selectedAttractor === key;
-          return (
-            <g key={key}>
-              <circle
-                cx={point.x}
-                cy={point.y}
-                fill={style.fill}
-                r={config.target_cluster_radius}
-                stroke={selected ? style.stroke : "transparent"}
-                strokeDasharray={selected ? "10 10" : undefined}
-                strokeWidth={selected ? 2.5 : 0}
-              />
-              <circle
-                cx={point.x}
-                cy={point.y}
-                fill={selected ? style.stroke : style.fill}
-                r={selected ? 11 : 9}
-                stroke="#ffffff"
-                strokeWidth={2}
-              />
-              <text
-                fill={style.stroke}
-                fontFamily="var(--font-ui)"
-                fontSize="14"
-                fontWeight="700"
-                letterSpacing="1.2"
-                textAnchor="middle"
-                x={point.x}
-                y={point.y - config.target_cluster_radius - 14}
-              >
-                {style.label}
-              </text>
-            </g>
-          );
-        })}
-
-        {ghostAgentsEnabled &&
-          activeFrame?.agents.map((agent, index) => (
-            <g
-              key={`${agent.group}-${index}`}
-              className={!designMode ? "preview-agent" : undefined}
-              transform={`translate(${agent.x} ${agent.y}) rotate(${(agent.heading * 180) / Math.PI})`}
-            >
-              {config.shape === "circle" ? (
-                <circle
-                  fill={groupColor(agent.group, preview?.phase ?? "center")}
-                  opacity={0.92}
-                  r={Math.max(4, config.size * 0.88)}
-                  stroke="rgba(255,255,255,0.72)"
-                  strokeWidth={0.8}
-                />
-              ) : (
-                <path
-                  d={shapePath(config.shape, config.size * 0.92)}
-                  fill={groupColor(agent.group, preview?.phase ?? "center")}
-                  opacity={0.92}
-                  stroke="rgba(255,255,255,0.72)"
-                  strokeWidth={0.8}
-                />
-              )}
-            </g>
-          ))}
-      </svg>
-
-      <div className="pointer-events-none absolute left-4 top-4 rounded-full border border-[color:var(--line-strong)] bg-white/88 px-4 py-2 text-[11px] font-semibold uppercase tracking-[0.22em] text-[color:var(--ink-muted)] shadow-[0_12px_30px_rgba(15,33,46,0.12)] backdrop-blur">
-        {designMode ? "Preview paused for layout editing" : playbackEnabled ? "Looping preview clip" : "Preview held"}
+      <div className="pointer-events-none absolute left-3 top-3">
+        <span className="preview-badge">
+          {designMode ? "Layout editing — playback paused" : playbackEnabled ? "Looping preview" : "Preview held"}
+        </span>
       </div>
 
-      {activeFrame && (
-        <div className="pointer-events-none absolute right-4 top-4 rounded-full border border-[color:var(--line-strong)] bg-white/88 px-4 py-2 text-[11px] font-semibold uppercase tracking-[0.22em] text-[color:var(--ink-muted)] shadow-[0_12px_30px_rgba(15,33,46,0.12)] backdrop-blur">
-          {activeFrame.time_seconds.toFixed(1)}s
-        </div>
-      )}
+      <div className="pointer-events-none absolute right-3 top-3">
+        <span ref={timeBadgeRef} className="preview-badge mono">
+          --
+        </span>
+      </div>
 
       {designMode && (
-        <div className="pointer-events-none absolute bottom-4 left-4 rounded-full border border-[color:var(--line-strong)] bg-white/88 px-4 py-2 text-xs font-semibold uppercase tracking-[0.22em] text-[color:var(--ink-muted)] shadow-[0_12px_30px_rgba(15,33,46,0.12)] backdrop-blur">
-          Click to place the {ATTRACTOR_STYLES[selectedAttractor].label.toLowerCase()} target
+        <div className="pointer-events-none absolute bottom-3 left-3">
+          <span className="preview-badge">
+            Click to place the {ATTRACTOR_STYLES[selectedAttractor].label.toLowerCase()} target
+          </span>
         </div>
       )}
     </div>
@@ -191,40 +252,43 @@ function StimulusPreview({
 
 function groupColor(group: string, phase: string) {
   if (phase !== "split") {
-    return "#4B6275";
+    return "#4b6275";
   }
   if (group === "left") {
-    return "#1A76FF";
+    return "#2563eb";
   }
   if (group === "right") {
-    return "#DB6E3F";
+    return "#d2693f";
   }
-  return "#4B6275";
+  return "#4b6275";
 }
 
-function shapePath(shape: string, size: number) {
+function tracePath(ctx: CanvasRenderingContext2D, shape: string, size: number) {
   if (shape === "square") {
-    return `M ${size} ${size} L ${size} ${-size} L ${-size} ${-size} L ${-size} ${size} Z`;
+    ctx.moveTo(size, size);
+    ctx.lineTo(size, -size);
+    ctx.lineTo(-size, -size);
+    ctx.lineTo(-size, size);
+    ctx.closePath();
+    return;
   }
   if (shape === "arrow") {
-    return [
-      `M ${size * 1.4} 0`,
-      `L ${size * 0.18} ${-size * 0.8}`,
-      `L ${size * 0.06} ${-size * 0.32}`,
-      `L ${-size} ${-size * 0.32}`,
-      `L ${-size} ${size * 0.32}`,
-      `L ${size * 0.06} ${size * 0.32}`,
-      `L ${size * 0.18} ${size * 0.8}`,
-      "Z",
-    ].join(" ");
+    ctx.moveTo(size * 1.4, 0);
+    ctx.lineTo(size * 0.18, -size * 0.8);
+    ctx.lineTo(size * 0.06, -size * 0.32);
+    ctx.lineTo(-size, -size * 0.32);
+    ctx.lineTo(-size, size * 0.32);
+    ctx.lineTo(size * 0.06, size * 0.32);
+    ctx.lineTo(size * 0.18, size * 0.8);
+    ctx.closePath();
+    return;
   }
-  return [
-    `M ${size * 1.42} 0`,
-    `L ${-size * 0.94} ${-size * 0.74}`,
-    `L ${-size * 0.34} 0`,
-    `L ${-size * 0.94} ${size * 0.74}`,
-    "Z",
-  ].join(" ");
+  // triangle (default)
+  ctx.moveTo(size * 1.42, 0);
+  ctx.lineTo(-size * 0.94, -size * 0.74);
+  ctx.lineTo(-size * 0.34, 0);
+  ctx.lineTo(-size * 0.94, size * 0.74);
+  ctx.closePath();
 }
 
 export default StimulusPreview;

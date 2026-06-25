@@ -1,4 +1,4 @@
-import { startTransition, useDeferredValue, useEffect, useMemo, useState, type ReactNode } from "react";
+import { startTransition, useDeferredValue, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
 import StimulusPreview from "./components/StimulusPreview";
 import Tooltip from "./components/Tooltip";
@@ -32,7 +32,6 @@ import {
   SHAPE_OPTIONS,
   type AppConfig,
   type AttractorKey,
-  type ParameterGroupId,
   type ParameterSpec,
   type PreviewPhase,
 } from "./lib/defaults";
@@ -70,6 +69,8 @@ function App() {
   const [infoMessage, setInfoMessage] = useState("Starting backend…");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [previewError, setPreviewError] = useState<string | null>(null);
+
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const busy = status ? ACTIVE_JOB_STATUSES.has(status.status) : false;
   const canStop = status?.status === "queued" || status?.status === "running";
@@ -498,6 +499,89 @@ function App() {
     }
   };
 
+  const handleExportConfig = () => {
+    const blob = new Blob([JSON.stringify(config, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = "fish-stimulus-config.json";
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+    setInfoMessage("Saved the current configuration to fish-stimulus-config.json.");
+  };
+
+  const handleImportConfigFile = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = ""; // allow re-importing the same file name
+    if (!file) {
+      return;
+    }
+    try {
+      const parsed = JSON.parse(await file.text());
+      const source =
+        parsed && typeof parsed === "object" && parsed.config && typeof parsed.config === "object"
+          ? (parsed.config as Record<string, unknown>)
+          : (parsed as Record<string, unknown>);
+
+      setConfig((current) => {
+        const next = { ...current };
+        for (const key of Object.keys(DEFAULT_CONFIG) as Array<keyof AppConfig>) {
+          const incoming = source[key as string];
+          if (incoming === undefined || incoming === null) {
+            continue;
+          }
+          if (typeof DEFAULT_CONFIG[key] === "number") {
+            const numeric = Number(incoming);
+            if (Number.isFinite(numeric)) {
+              (next as Record<string, unknown>)[key] = numeric;
+            }
+          } else {
+            (next as Record<string, unknown>)[key] = incoming;
+          }
+        }
+
+        // Re-derive interdependent fields so an imported file can never land in
+        // an invalid state (split counts, then the phase schedule windows).
+        const balanced = rebalanceSplit(next.number_of_agents, next.left_count);
+        const videoDuration = Math.max(60, Math.min(180, next.video_duration));
+        const timeInCenter = Math.max(
+          5,
+          Math.min(next.time_in_center, videoDuration - (MIN_STABILIZATION_WINDOW_SECONDS + MIN_SPLIT_OBSERVATION_SECONDS)),
+        );
+        const timeToSplit = Math.max(
+          timeInCenter + MIN_STABILIZATION_WINDOW_SECONDS,
+          Math.min(next.time_to_split, videoDuration - MIN_SPLIT_OBSERVATION_SECONDS),
+        );
+        return {
+          ...next,
+          ...balanced,
+          video_duration: videoDuration,
+          time_in_center: timeInCenter,
+          time_to_split: timeToSplit,
+        };
+      });
+
+      setBehaviorPresetId("custom");
+      setLayoutPresetId("custom");
+      setErrorMessage(null);
+      setInfoMessage(`Loaded configuration from ${file.name}.`);
+    } catch (error) {
+      setErrorMessage(
+        error instanceof Error ? `Could not load configuration: ${error.message}` : "Could not load the configuration file.",
+      );
+    }
+  };
+
+  const handleResetDefaults = () => {
+    setConfig((current) => applyBehaviorPreset({ ...DEFAULT_CONFIG, output_path: current.output_path }, "clean-split"));
+    setBehaviorPresetId("clean-split");
+    setLayoutPresetId(DEFAULT_LAYOUT_PRESET_ID);
+    setErrorMessage(null);
+    setInfoMessage("Restored the recommended default configuration.");
+  };
+
   const renderParameterField = (spec: ParameterSpec) => {
     if (spec.advanced && !advancedSettings) {
       return null;
@@ -566,267 +650,224 @@ function App() {
     ? [{ id: "custom", name: "Custom tuning", description: "Manual adjustments are active.", patch: {} }, ...BEHAVIOR_PRESETS]
     : BEHAVIOR_PRESETS;
 
+  const backendStatusLabel = errorMessage ? "Error" : backendReady ? "Ready" : "Starting";
+
   return (
-    <div className="min-h-screen px-4 py-4 text-[color:var(--ink)] md:px-6 lg:px-8">
-      <div className="mx-auto flex max-w-[1680px] flex-col gap-6">
-        <header className="panel-surface overflow-hidden rounded-[36px] px-6 py-6 md:px-8 md:py-8">
-          <div className="grid gap-6 xl:grid-cols-[minmax(0,1.2fr)_420px]">
-            <div className="relative">
-              <p className="eyebrow">Stimulus Design Console</p>
-              <h1 className="mt-3 max-w-4xl font-display text-4xl leading-[0.98] tracking-[-0.04em] text-[color:var(--ink)] md:text-6xl">
-                Make every setting visually interpretable before you export the experiment.
-              </h1>
-              <p className="mt-4 max-w-3xl text-sm leading-7 text-[color:var(--ink-muted)] md:text-base">
-                This desktop console is tuned for lab users: preview-first controls, exact split counts, safe biological ranges,
-                and clean stop or cancel handling for deterministic MP4 generation.
-              </p>
+    <div className="min-h-screen pb-12 text-[color:var(--ink)]">
+      <input
+        ref={fileInputRef}
+        accept="application/json,.json"
+        className="hidden"
+        type="file"
+        onChange={handleImportConfigFile}
+      />
+
+      <header className="top-bar">
+        <div className="mx-auto flex max-w-[1640px] flex-wrap items-center gap-x-5 gap-y-3 px-4 py-3 md:px-6">
+          <div className="flex items-center gap-3">
+            <div className="flex h-8 w-8 items-center justify-center rounded-md bg-[color:var(--accent)] font-display text-sm font-bold text-white">
+              F
             </div>
-
-            <div className="grid gap-4">
-              <div className="status-panel">
-                <div>
-                  <p className="eyebrow text-[color:var(--ink-muted)]">Backend</p>
-                  <p className="mt-2 text-lg font-semibold text-[color:var(--ink)]">
-                    {errorMessage ? "Startup failed" : backendReady ? "Local engine online" : "Booting service"}
-                  </p>
-                  <p className="mt-2 text-sm text-[color:var(--ink-muted)]">{infoMessage}</p>
-                </div>
-                <span className={`status-pill ${statusTone(errorMessage, backendReady)}`}>
-                  {errorMessage ? "Error" : backendReady ? "Ready" : "Starting"}
-                </span>
-              </div>
-
-              <div className="panel-soft flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
-                <div className="space-y-1">
-                  <div className="flex items-center gap-2">
-                    <span className="text-sm font-semibold text-[color:var(--ink)]">Advanced Settings</span>
-                    <Tooltip content="Shows expert-facing controls such as turning bias, interaction radii, and seed selection. Leave this off for a cleaner biology-first workflow." />
-                  </div>
-                  <p className="text-xs uppercase tracking-[0.22em] text-[color:var(--ink-faint)]">
-                    {advancedSettings ? "Expert controls visible" : "Only essential controls visible"}
-                  </p>
-                </div>
-
-                <div className="flex items-center gap-3">
-                  <ToggleControl
-                    checked={advancedSettings}
-                    disabled={!backendReady || busy}
-                    label="Advanced"
-                    tooltip="Toggles expert-level controls that are hidden by default for non-specialist users."
-                    onChange={setAdvancedSettings}
-                  />
-                  <button
-                    className="action-button action-button-secondary"
-                    disabled={!backendReady || busy}
-                    onClick={handleAutoOptimize}
-                  >
-                    Optimize for this machine
-                  </button>
-                </div>
-              </div>
+            <div className="leading-tight">
+              <h1 className="font-display text-[0.98rem] text-[color:var(--ink)]">Fish Stimulus Generator</h1>
+              <p className="text-[11px] text-[color:var(--ink-faint)]">Deterministic shoaling stimulus console</p>
             </div>
           </div>
-        </header>
 
-        <main className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_420px]">
-          <section className="flex flex-col gap-6">
-            <div className="panel-surface rounded-[34px] p-5 md:p-6">
-              <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-                <div>
-                  <p className="eyebrow">Real-Time Preview</p>
-                  <h2 className="mt-2 font-display text-3xl tracking-[-0.04em] text-[color:var(--ink)]">
-                    See what each change does before you render
-                  </h2>
-                  <p className="mt-2 max-w-2xl text-sm leading-6 text-[color:var(--ink-muted)]">
-                    The preview stage loops a short clip from the real deterministic engine using a lighter preview configuration,
-                    so model changes, split timing, and clustering controls stay visually interpretable while you work.
-                  </p>
-                </div>
+          <span className={`status-pill ${statusTone(errorMessage, backendReady)}`}>
+            <span className="mr-1.5 inline-block h-1.5 w-1.5 rounded-full bg-current" />
+            {backendStatusLabel}
+          </span>
 
-                <div className="flex flex-wrap gap-3">
+          <div className="ml-auto flex flex-wrap items-center gap-2">
+            <label className="mr-1 flex items-center gap-2 text-sm text-[color:var(--ink-muted)]">
+              <span>Advanced</span>
+              <button
+                aria-pressed={advancedSettings}
+                className={`toggle-ring ${advancedSettings ? "toggle-ring-on" : ""}`}
+                disabled={!backendReady || busy}
+                type="button"
+                onClick={() => setAdvancedSettings((current) => !current)}
+              >
+                <span className="toggle-knob" />
+              </button>
+            </label>
+            <button className="action-button action-button-secondary action-button-sm" disabled={!backendReady || busy} onClick={handleAutoOptimize}>
+              Optimize
+            </button>
+            <button className="action-button action-button-secondary action-button-sm" disabled={busy} onClick={handleExportConfig}>
+              Save
+            </button>
+            <button className="action-button action-button-secondary action-button-sm" disabled={busy} onClick={() => fileInputRef.current?.click()}>
+              Load
+            </button>
+            <button className="action-button action-button-secondary action-button-sm" disabled={!backendReady || busy} onClick={handleResetDefaults}>
+              Reset
+            </button>
+            <button className="action-button" disabled={!backendReady || busy || designMode} onClick={handleGenerate}>
+              Generate MP4
+            </button>
+          </div>
+        </div>
+      </header>
+
+      <main className="mx-auto mt-5 grid max-w-[1640px] gap-5 px-4 md:px-6 xl:grid-cols-[minmax(0,1fr)_380px]">
+        <section className="flex min-w-0 flex-col gap-5">
+          <div className="panel-surface p-4 md:p-5">
+            <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+              <div>
+                <p className="eyebrow">Real-time preview</p>
+                <h2 className="mt-1 font-display text-lg text-[color:var(--ink)]">Inspect every change before you render</h2>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {PREVIEW_PHASE_OPTIONS.map((option) => (
                   <button
-                    className="action-button action-button-secondary"
+                    key={option.id}
+                    className={`chip-button ${previewPhase === option.id ? "chip-button-active" : ""}`}
                     disabled={!backendReady}
-                    onClick={handleSeePreview}
+                    onClick={() => setPreviewPhase(option.id)}
                   >
-                    {previewLoading ? "Refreshing preview…" : "See Preview"}
+                    {option.label}
                   </button>
-                  <button
-                    className="action-button"
-                    disabled={!backendReady || busy || designMode}
-                    onClick={handleGenerate}
-                  >
-                    Generate MP4
-                  </button>
-                </div>
-              </div>
-
-              <div className="mt-6 grid gap-5 xl:grid-cols-[minmax(0,1fr)_320px]">
-                <StimulusPreview
-                  config={config}
-                  designMode={designMode}
-                  ghostAgentsEnabled={ghostAgentsEnabled}
-                  playbackEnabled={previewLoopEnabled}
-                  preview={preview}
-                  selectedAttractor={selectedAttractor}
-                  onPlaceAttractor={handleAttractorPlacement}
-                />
-
-                <div className="flex flex-col gap-4">
-                  <div className="panel-soft">
-                    <LabelRow
-                      label="Preview Mode"
-                      tooltip="Choose which phase of the paradigm to preview. Each mode loops a short clip focused on that part of the experiment."
-                    />
-                    <div className="mt-3 flex flex-wrap gap-2">
-                      {PREVIEW_PHASE_OPTIONS.map((option) => (
-                        <button
-                          key={option.id}
-                          className={`chip-button ${previewPhase === option.id ? "chip-button-active" : ""}`}
-                          disabled={!backendReady}
-                          onClick={() => setPreviewPhase(option.id)}
-                        >
-                          {option.label}
-                        </button>
-                      ))}
-                    </div>
-                    <p className="mt-3 text-sm leading-6 text-[color:var(--ink-muted)]">
-                      {PREVIEW_PHASE_OPTIONS.find((option) => option.id === previewPhase)?.description}
-                    </p>
-                  </div>
-
-                  <div className="panel-soft">
-                    <LabelRow
-                      label="Preview Toggles"
-                      tooltip="Turn on or off lightweight visual aids while you inspect the arena."
-                    />
-                    <div className="mt-3 flex flex-col gap-3">
-                      <ToggleControl
-                        checked={designMode}
-                        disabled={!backendReady || busy}
-                        label="Design Mode"
-                        tooltip="Pauses preview playback and leaves only layout editing active so you can place attractors safely."
-                        onChange={handleDesignModeToggle}
-                      />
-                      <ToggleControl
-                        checked={ghostAgentsEnabled}
-                        disabled={!backendReady}
-                        label="Ghost Fish"
-                        tooltip="Shows the preview fish positions on the arena so you can judge spread, cluster tightness, and branch separation."
-                        onChange={setGhostAgentsEnabled}
-                      />
-                    </div>
-                  </div>
-
-                  <div className="panel-soft">
-                    <LabelRow
-                      label="Layout Preset"
-                      tooltip="Applies a reproducible attractor arrangement. These presets change the geometry of the arena, not the seed or exact split counts."
-                    />
-                    <select
-                      className="input-control mt-3"
-                      disabled={!backendReady || busy}
-                      value={layoutPresetId}
-                      onChange={(event) => handleLayoutPresetChange(event.target.value)}
-                    >
-                      {layoutPresetId === "custom" && <option value="custom">Custom layout</option>}
-                      {LAYOUT_PRESETS.map((preset) => (
-                        <option key={preset.id} value={preset.id}>
-                          {preset.name}
-                        </option>
-                      ))}
-                    </select>
-                    <p className="mt-3 text-sm leading-6 text-[color:var(--ink-muted)]">
-                      {layoutPresetId === "custom"
-                        ? "The attractors are currently hand-edited from the preview canvas."
-                        : (LAYOUT_PRESETS.find((entry) => entry.id === layoutPresetId)?.description ?? "")}
-                    </p>
-                  </div>
-
-                  <div className="panel-soft">
-                    <LabelRow
-                      label="Placement Target"
-                      tooltip="Choose which attractor the next canvas click will update while design mode is active."
-                    />
-                    <div className="mt-3 flex flex-wrap gap-2">
-                      {ATTRACTOR_OPTIONS.map((option) => (
-                        <button
-                          key={option.id}
-                          className={`chip-button ${selectedAttractor === option.id ? "chip-button-active" : ""}`}
-                          disabled={!backendReady || busy}
-                          onClick={() => setSelectedAttractor(option.id)}
-                        >
-                          {option.label}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-
-                  <div className="panel-soft">
-                    <p className="eyebrow text-[color:var(--ink-faint)]">Preview status</p>
-                    <p className="mt-2 text-sm leading-6 text-[color:var(--ink-muted)]">{previewMessage}</p>
-                    {previewError && (
-                      <div className="warning-box mt-3">
-                        {previewError}
-                      </div>
-                    )}
-                  </div>
-                </div>
-              </div>
-
-              <div className="mt-5 grid gap-3 md:grid-cols-3 xl:grid-cols-6">
-                {previewMetrics.map((metric) => (
-                  <PreviewMetric key={metric.label} label={metric.label} value={metric.value} />
                 ))}
+                <button className="action-button action-button-secondary action-button-sm" disabled={!backendReady} onClick={handleSeePreview}>
+                  {previewLoading ? "Refreshing…" : "Refresh"}
+                </button>
               </div>
             </div>
 
-            <div className="grid gap-5 lg:grid-cols-2">
-              <SectionPanel
-                description={CONTROL_SECTIONS.find((section) => section.id === "group-behavior")?.description ?? ""}
-                disabled={controlsLocked}
-                title="Group Behavior"
-              >
-                <SelectField
-                  disabled={controlsLocked}
-                  label="Motion Model"
-                  tooltip="Selects the interaction model used underneath the shared integrator. The preview updates instantly so you can compare each model visually."
-                  value={config.model_type}
-                  options={MODEL_OPTIONS}
-                  onChange={(value) => {
-                    setBehaviorPresetId("custom");
-                    updateConfigValue("model_type", value, { markBehaviorCustom: false });
-                  }}
-                />
-                <div className="mt-4 grid gap-4">
-                  {PARAMETER_SPECS.filter((spec) => spec.group === "group-behavior").map(renderParameterField)}
-                </div>
-              </SectionPanel>
+            <div className="mt-4 grid gap-4 xl:grid-cols-[minmax(0,1fr)_300px]">
+              <StimulusPreview
+                config={config}
+                designMode={designMode}
+                ghostAgentsEnabled={ghostAgentsEnabled}
+                playbackEnabled={previewLoopEnabled}
+                preview={preview}
+                selectedAttractor={selectedAttractor}
+                onPlaceAttractor={handleAttractorPlacement}
+              />
 
-              <SectionPanel
-                description={CONTROL_SECTIONS.find((section) => section.id === "movement-noise")?.description ?? ""}
-                disabled={controlsLocked}
-                title="Movement Noise"
-              >
-                <div className="grid gap-4">
-                  {PARAMETER_SPECS.filter((spec) => spec.group === "movement-noise").map(renderParameterField)}
+              <div className="flex flex-col gap-3">
+                <div className="panel-soft">
+                  <p className="text-sm leading-6 text-[color:var(--ink-muted)]">
+                    {PREVIEW_PHASE_OPTIONS.find((option) => option.id === previewPhase)?.description}
+                  </p>
                 </div>
-              </SectionPanel>
 
-              <SectionPanel
-                description={CONTROL_SECTIONS.find((section) => section.id === "splitting-control")?.description ?? ""}
+                <div className="panel-soft">
+                  <LabelRow label="Preview aids" tooltip="Lightweight visual helpers while you inspect the arena." />
+                  <div className="mt-3 flex flex-col gap-2.5">
+                    <ToggleControl
+                      checked={designMode}
+                      disabled={!backendReady || busy}
+                      label="Design mode"
+                      tooltip="Pauses playback and leaves only layout editing active so you can click to place attractors."
+                      onChange={handleDesignModeToggle}
+                    />
+                    <ToggleControl
+                      checked={ghostAgentsEnabled}
+                      disabled={!backendReady}
+                      label="Ghost fish"
+                      tooltip="Shows preview fish positions so you can judge spread, cluster tightness, and branch separation."
+                      onChange={setGhostAgentsEnabled}
+                    />
+                  </div>
+                </div>
+
+                <div className="panel-soft">
+                  <LabelRow label="Layout preset" tooltip="Applies a reproducible attractor arrangement. Changes geometry only — not the seed or split counts." />
+                  <select
+                    className="input-control mt-2.5"
+                    disabled={!backendReady || busy}
+                    value={layoutPresetId}
+                    onChange={(event) => handleLayoutPresetChange(event.target.value)}
+                  >
+                    {layoutPresetId === "custom" && <option value="custom">Custom layout</option>}
+                    {LAYOUT_PRESETS.map((preset) => (
+                      <option key={preset.id} value={preset.id}>
+                        {preset.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="panel-soft">
+                  <LabelRow label="Placement target" tooltip="Which attractor the next canvas click updates while design mode is active." />
+                  <div className="mt-2.5 flex flex-wrap gap-2">
+                    {ATTRACTOR_OPTIONS.map((option) => (
+                      <button
+                        key={option.id}
+                        className={`chip-button ${selectedAttractor === option.id ? "chip-button-active" : ""}`}
+                        disabled={!backendReady || busy}
+                        onClick={() => setSelectedAttractor(option.id)}
+                      >
+                        {option.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="panel-soft">
+                  <p className="text-xs leading-5 text-[color:var(--ink-muted)]">{previewMessage}</p>
+                  {previewError && <div className="warning-box mt-2">{previewError}</div>}
+                </div>
+              </div>
+            </div>
+
+            <div className="mt-4 grid gap-2.5 sm:grid-cols-3 xl:grid-cols-6">
+              {previewMetrics.map((metric) => (
+                <PreviewMetric key={metric.label} label={metric.label} value={metric.value} />
+              ))}
+            </div>
+          </div>
+
+          <div className="grid gap-5 lg:grid-cols-2">
+            <SectionPanel
+              description={CONTROL_SECTIONS.find((section) => section.id === "group-behavior")?.description ?? ""}
+              disabled={controlsLocked}
+              title="Group Behavior"
+            >
+              <SelectField
                 disabled={controlsLocked}
-                title="Splitting Control"
-              >
-                <PhaseScheduleCard
-                  aggregationEnd={config.time_in_center}
-                  disabled={controlsLocked}
-                  splitStart={config.time_to_split}
-                  videoEnd={config.video_duration}
-                  onAggregationEndChange={handleTimeInCenterChange}
-                  onSplitStartChange={handleTimeToSplitChange}
-                  onVideoEndChange={handleVideoDurationChange}
-                />
+                label="Motion Model"
+                tooltip="Selects the interaction model used underneath the shared integrator. The preview updates instantly so you can compare each model visually."
+                value={config.model_type}
+                options={MODEL_OPTIONS}
+                onChange={(value) => {
+                  setBehaviorPresetId("custom");
+                  updateConfigValue("model_type", value, { markBehaviorCustom: false });
+                }}
+              />
+              <div className="mt-3 grid gap-3">
+                {PARAMETER_SPECS.filter((spec) => spec.group === "group-behavior").map(renderParameterField)}
+              </div>
+            </SectionPanel>
+
+            <SectionPanel
+              description={CONTROL_SECTIONS.find((section) => section.id === "movement-noise")?.description ?? ""}
+              disabled={controlsLocked}
+              title="Movement Noise"
+            >
+              <div className="grid gap-3">
+                {PARAMETER_SPECS.filter((spec) => spec.group === "movement-noise").map(renderParameterField)}
+              </div>
+            </SectionPanel>
+
+            <SectionPanel
+              description={CONTROL_SECTIONS.find((section) => section.id === "splitting-control")?.description ?? ""}
+              disabled={controlsLocked}
+              title="Splitting Control"
+            >
+              <PhaseScheduleCard
+                aggregationEnd={config.time_in_center}
+                disabled={controlsLocked}
+                splitStart={config.time_to_split}
+                videoEnd={config.video_duration}
+                onAggregationEndChange={handleTimeInCenterChange}
+                onSplitStartChange={handleTimeToSplitChange}
+                onVideoEndChange={handleVideoDurationChange}
+              />
+              <div className="mt-3">
                 <SplitBalanceField
                   disabled={controlsLocked}
                   leftCount={config.left_count}
@@ -834,211 +875,179 @@ function App() {
                   totalAgents={config.number_of_agents}
                   onChange={handleLeftCountChange}
                 />
-                <div className="mt-4 grid gap-4">
-                  {PARAMETER_SPECS
-                    .filter((spec) => spec.group === "splitting-control" && !["time_in_center", "time_to_split"].includes(spec.key))
-                    .map(renderParameterField)}
-                </div>
-              </SectionPanel>
-
-              <SectionPanel
-                description={CONTROL_SECTIONS.find((section) => section.id === "environment")?.description ?? ""}
-                disabled={environmentLocked}
-                title="Environment"
-              >
-                <div className="grid gap-4">
-                  {PARAMETER_SPECS.filter((spec) => spec.group === "environment").map(renderParameterField)}
-                  <CoordinateGrid
-                    config={config}
-                    disabled={environmentLocked}
-                    onChange={(key, value) => updateConfigValue(key, value, { markLayoutCustom: true })}
-                  />
-                </div>
-              </SectionPanel>
-
-              <SectionPanel
-                description={CONTROL_SECTIONS.find((section) => section.id === "rendering")?.description ?? ""}
-                disabled={controlsLocked}
-                title="Rendering"
-              >
-                <div className="grid gap-4">
-                  {PARAMETER_SPECS
-                    .filter((spec) => spec.group === "rendering" && spec.key !== "video_duration")
-                    .map(renderParameterField)}
-                  <SelectField
-                    disabled={controlsLocked}
-                    label="Marker Shape"
-                    tooltip="Controls the rendered marker shape used in the preview and exported MP4."
-                    value={config.shape}
-                    options={SHAPE_OPTIONS}
-                    onChange={(value) => updateConfigValue("shape", value, { markBehaviorCustom: false })}
-                  />
-                  <TextField
-                    disabled={controlsLocked}
-                    label="Arena Background"
-                    tooltip="Sets the arena background color in both the preview panel and exported MP4."
-                    value={config.background_color}
-                    onChange={(value) => updateConfigValue("background_color", value, { markBehaviorCustom: false })}
-                  />
-                  <TextField
-                    disabled={controlsLocked}
-                    label="Output Path"
-                    tooltip="Sets where the MP4 should be written. A metadata JSON file is written beside it when export completes."
-                    value={config.output_path}
-                    onChange={(value) => updateConfigValue("output_path", value, { markBehaviorCustom: false })}
-                  />
-                </div>
-              </SectionPanel>
-            </div>
-          </section>
-
-          <aside className="flex flex-col gap-5">
-            <div className="panel-surface rounded-[30px] p-5">
-              <p className="eyebrow">Quick Presets</p>
-              <h2 className="mt-2 font-display text-3xl tracking-[-0.04em] text-[color:var(--ink)]">Start from a safe behavioral profile</h2>
-              <p className="mt-2 text-sm leading-6 text-[color:var(--ink-muted)]">
-                These presets give non-specialist users a strong starting point before they fine-tune the preview.
-              </p>
-              <div className="mt-4 grid gap-3">
-                {presetOptions.map((preset) => (
-                  <PresetButton
-                    key={preset.id}
-                    active={behaviorPresetId === preset.id}
-                    description={preset.description}
-                    disabled={!backendReady || busy || designMode}
-                    label={preset.recommended ? `${preset.name} (Recommended)` : preset.name}
-                    onClick={() => handleBehaviorPresetChange(preset.id)}
-                  />
-                ))}
               </div>
-            </div>
-
-            <div className="panel-surface rounded-[30px] p-5">
-              <div className="flex items-start justify-between gap-4">
-                <div>
-                  <p className="eyebrow">Run Control</p>
-                  <h2 className="mt-2 font-display text-3xl tracking-[-0.04em] text-[color:var(--ink)]">
-                    {busy ? "Rendering stimulus" : "Ready to export"}
-                  </h2>
-                  <p className="mt-2 text-sm leading-6 text-[color:var(--ink-muted)]">
-                    Progress, phase, and interruption controls stay available throughout the export lifecycle.
-                  </p>
-                </div>
-                <span className={`status-pill ${jobTone(status?.status)}`}>{humanizeJobStatus(status?.status ?? (backendReady ? "idle" : "booting"))}</span>
+              <div className="mt-3 grid gap-3">
+                {PARAMETER_SPECS
+                  .filter((spec) => spec.group === "splitting-control" && !["time_in_center", "time_to_split"].includes(spec.key))
+                  .map(renderParameterField)}
               </div>
+            </SectionPanel>
 
-              {errorMessage && <div className="warning-box mt-4">{errorMessage}</div>}
-
-              <div className="status-panel-dark mt-5">
-                <div className="flex items-center justify-between">
-                  <span className="text-sm font-semibold text-white">Render progress</span>
-                  <span className="text-sm text-white/70">{progressValue}%</span>
-                </div>
-                <div className="mt-3 h-2 overflow-hidden rounded-full bg-white/10">
-                  <div className="h-full rounded-full bg-[color:var(--accent)] transition-all duration-300" style={{ width: `${progressValue}%` }} />
-                </div>
-                <div className="mt-4 grid grid-cols-2 gap-3 text-sm">
-                  <StatTile label="Job" value={jobId ? jobId.slice(0, 8) : "--"} />
-                  <StatTile label="Phase" value={humanizePhase(status?.phase)} />
-                  <StatTile label="ETA" value={formatEta(status?.eta_seconds)} />
-                  <StatTile label="State" value={humanizeJobStatus(status?.status ?? (backendReady ? "idle" : "booting"))} />
-                </div>
-              </div>
-
-              <div className="mt-4 flex flex-wrap gap-3">
-                <button
-                  className="action-button"
-                  disabled={!backendReady || busy || designMode}
-                  onClick={handleGenerate}
-                >
-                  Generate MP4
-                </button>
-                <button
-                  className="action-button action-button-secondary"
-                  disabled={!canStop}
-                  onClick={handleStop}
-                >
-                  Stop Gracefully
-                </button>
-                <button
-                  className="action-button action-button-danger"
-                  disabled={!canCancel}
-                  onClick={handleCancel}
-                >
-                  Cancel Now
-                </button>
-              </div>
-            </div>
-
-            <div className="panel-surface rounded-[30px] p-5">
-              <p className="eyebrow">Safety Notes</p>
-              <h2 className="mt-2 font-display text-3xl tracking-[-0.04em] text-[color:var(--ink)]">Biological plausibility</h2>
-              <p className="mt-2 text-sm leading-6 text-[color:var(--ink-muted)]">
-                Warnings are non-blocking, but they flag settings that may make the motion harder to interpret in a real experiment.
-              </p>
-              <div className="mt-4 flex flex-col gap-3">
-                {warnings.length > 0 ? (
-                  warnings.map((warning) => (
-                    <div key={warning} className="warning-card">
-                      {warning}
-                    </div>
-                  ))
-                ) : (
-                  <div className="rounded-[22px] border border-emerald-200 bg-emerald-50 px-4 py-4 text-sm text-emerald-800">
-                    Current settings stay within the recommended operating ranges.
-                  </div>
-                )}
-              </div>
-            </div>
-
-            <div className="panel-surface rounded-[30px] p-5">
-              <p className="eyebrow">Study Summary</p>
-              <div className="mt-4 space-y-3">
-                {summaryRows.map((row) => (
-                  <div key={row.label} className="flex items-center justify-between gap-3 text-sm">
-                    <span className="text-[color:var(--ink-muted)]">{row.label}</span>
-                    <span className="text-right font-semibold text-[color:var(--ink)]">{row.value}</span>
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            <div className="panel-surface rounded-[30px] p-5">
-              <div className="flex items-start justify-between gap-4">
-                <div>
-                  <p className="eyebrow">Video Preview</p>
-                  <p className="mt-2 text-sm leading-6 text-[color:var(--ink-muted)]">
-                    Completed or gracefully stopped exports appear here without leaving the desktop app.
-                  </p>
-                </div>
-              </div>
-
-              {previewUrl && status?.status && TERMINAL_VIDEO_STATUSES.has(status.status) ? (
-                <video
-                  key={previewUrl}
-                  className="mt-4 aspect-video w-full rounded-[24px] border border-[color:var(--line-strong)] bg-slate-950 object-cover shadow-[0_18px_40px_rgba(15,33,46,0.14)]"
-                  controls
-                  preload="metadata"
-                  src={previewUrl}
+            <SectionPanel
+              description={CONTROL_SECTIONS.find((section) => section.id === "environment")?.description ?? ""}
+              disabled={environmentLocked}
+              title="Environment"
+            >
+              <div className="grid gap-3">
+                {PARAMETER_SPECS.filter((spec) => spec.group === "environment").map(renderParameterField)}
+                <CoordinateGrid
+                  config={config}
+                  disabled={environmentLocked}
+                  onChange={(key, value) => updateConfigValue(key, value, { markLayoutCustom: true })}
                 />
+              </div>
+            </SectionPanel>
+
+            <SectionPanel
+              className="lg:col-span-2"
+              description={CONTROL_SECTIONS.find((section) => section.id === "rendering")?.description ?? ""}
+              disabled={controlsLocked}
+              title="Rendering"
+            >
+              <div className="grid gap-3 md:grid-cols-2">
+                {PARAMETER_SPECS
+                  .filter((spec) => spec.group === "rendering" && spec.key !== "video_duration")
+                  .map(renderParameterField)}
+                <SelectField
+                  disabled={controlsLocked}
+                  label="Marker Shape"
+                  tooltip="Controls the rendered marker shape used in the preview and exported MP4."
+                  value={config.shape}
+                  options={SHAPE_OPTIONS}
+                  onChange={(value) => updateConfigValue("shape", value, { markBehaviorCustom: false })}
+                />
+                <TextField
+                  disabled={controlsLocked}
+                  label="Arena Background"
+                  tooltip="Sets the arena background color in both the preview panel and exported MP4."
+                  value={config.background_color}
+                  onChange={(value) => updateConfigValue("background_color", value, { markBehaviorCustom: false })}
+                />
+                <TextField
+                  className="md:col-span-2"
+                  disabled={controlsLocked}
+                  label="Output Path"
+                  tooltip="Sets where the MP4 should be written. A metadata JSON file is written beside it when export completes."
+                  value={config.output_path}
+                  onChange={(value) => updateConfigValue("output_path", value, { markBehaviorCustom: false })}
+                />
+              </div>
+            </SectionPanel>
+          </div>
+        </section>
+
+        <aside className="flex min-w-0 flex-col gap-5">
+          <div className="panel-surface p-4 md:p-5">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <p className="eyebrow">Run control</p>
+                <h2 className="mt-1 font-display text-lg text-[color:var(--ink)]">{busy ? "Rendering stimulus" : "Ready to export"}</h2>
+              </div>
+              <span className={`status-pill ${jobTone(status?.status)}`}>{humanizeJobStatus(status?.status ?? (backendReady ? "idle" : "booting"))}</span>
+            </div>
+
+            {errorMessage && <div className="warning-box mt-3">{errorMessage}</div>}
+
+            <div className="status-panel-dark mt-4">
+              <div className="flex items-center justify-between">
+                <span className="text-sm font-semibold text-white">Render progress</span>
+                <span className="mono text-sm text-white/70">{progressValue}%</span>
+              </div>
+              <div className="mt-2.5 h-1.5 overflow-hidden rounded-full bg-white/10">
+                <div className="h-full rounded-full bg-[color:var(--accent)] transition-all duration-300" style={{ width: `${progressValue}%` }} />
+              </div>
+              <div className="mt-3 grid grid-cols-2 gap-2.5 text-sm">
+                <StatTile label="Job" value={jobId ? jobId.slice(0, 8) : "--"} />
+                <StatTile label="Phase" value={humanizePhase(status?.phase)} />
+                <StatTile label="ETA" value={formatEta(status?.eta_seconds)} />
+                <StatTile label="State" value={humanizeJobStatus(status?.status ?? (backendReady ? "idle" : "booting"))} />
+              </div>
+            </div>
+
+            <div className="mt-3 flex flex-wrap gap-2">
+              <button className="action-button" disabled={!backendReady || busy || designMode} onClick={handleGenerate}>
+                Generate MP4
+              </button>
+              <button className="action-button action-button-secondary" disabled={!canStop} onClick={handleStop}>
+                Stop
+              </button>
+              <button className="action-button action-button-danger" disabled={!canCancel} onClick={handleCancel}>
+                Cancel
+              </button>
+            </div>
+            <p className="mt-3 text-xs leading-5 text-[color:var(--ink-muted)]">{infoMessage}</p>
+          </div>
+
+          <div className="panel-surface p-4 md:p-5">
+            <p className="eyebrow">Quick presets</p>
+            <h2 className="mt-1 font-display text-lg text-[color:var(--ink)]">Start from a safe profile</h2>
+            <div className="mt-3 grid gap-2.5">
+              {presetOptions.map((preset) => (
+                <PresetButton
+                  key={preset.id}
+                  active={behaviorPresetId === preset.id}
+                  description={preset.description}
+                  disabled={!backendReady || busy || designMode}
+                  label={preset.recommended ? `${preset.name} (Recommended)` : preset.name}
+                  onClick={() => handleBehaviorPresetChange(preset.id)}
+                />
+              ))}
+            </div>
+          </div>
+
+          <div className="panel-surface p-4 md:p-5">
+            <p className="eyebrow">Biological plausibility</p>
+            <div className="mt-3 flex flex-col gap-2.5">
+              {warnings.length > 0 ? (
+                warnings.map((warning) => (
+                  <div key={warning} className="warning-card">
+                    {warning}
+                  </div>
+                ))
               ) : (
-                <div className="mt-4 flex aspect-video items-center justify-center rounded-[24px] border border-dashed border-[color:var(--line-strong)] bg-white/60 text-sm text-[color:var(--ink-muted)]">
-                  Generate or gracefully stop a stimulus to inspect the resulting MP4 here.
+                <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-3 text-sm text-emerald-800">
+                  Current settings stay within the recommended operating ranges.
                 </div>
               )}
-
-              <div className="mt-4 panel-soft text-sm text-[color:var(--ink-muted)]">
-                <div className="flex justify-between gap-3">
-                  <span>Output path</span>
-                  <span className="max-w-[180px] truncate text-right font-semibold text-[color:var(--ink)]">
-                    {(status?.output_path ?? config.output_path) || "--"}
-                  </span>
-                </div>
-              </div>
             </div>
-          </aside>
-        </main>
-      </div>
+          </div>
+
+          <div className="panel-surface p-4 md:p-5">
+            <p className="eyebrow">Study summary</p>
+            <div className="mt-3 space-y-2">
+              {summaryRows.map((row) => (
+                <div key={row.label} className="flex items-center justify-between gap-3 text-sm">
+                  <span className="text-[color:var(--ink-muted)]">{row.label}</span>
+                  <span className="mono text-right font-semibold text-[color:var(--ink)]">{row.value}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div className="panel-surface p-4 md:p-5">
+            <p className="eyebrow">Video output</p>
+            {previewUrl && status?.status && TERMINAL_VIDEO_STATUSES.has(status.status) ? (
+              <video
+                key={previewUrl}
+                className="mt-3 aspect-video w-full rounded-lg border border-[color:var(--line-strong)] bg-slate-950 object-cover"
+                controls
+                preload="metadata"
+                src={previewUrl}
+              />
+            ) : (
+              <div className="mt-3 flex aspect-video items-center justify-center rounded-lg border border-dashed border-[color:var(--line-strong)] bg-[#fbfcfe] px-4 text-center text-sm text-[color:var(--ink-muted)]">
+                Generate or gracefully stop a stimulus to inspect the resulting MP4 here.
+              </div>
+            )}
+            <div className="mt-3 flex justify-between gap-3 text-sm">
+              <span className="text-[color:var(--ink-muted)]">Output path</span>
+              <span className="mono max-w-[200px] truncate text-right font-semibold text-[color:var(--ink)]">
+                {(status?.output_path ?? config.output_path) || "--"}
+              </span>
+            </div>
+          </div>
+        </aside>
+      </main>
     </div>
   );
 }
@@ -1047,15 +1056,16 @@ type SectionPanelProps = {
   title: string;
   description: string;
   disabled: boolean;
+  className?: string;
   children: ReactNode;
 };
 
-function SectionPanel({ title, description, disabled, children }: SectionPanelProps) {
+function SectionPanel({ title, description, disabled, className, children }: SectionPanelProps) {
   return (
-    <fieldset className={`panel-surface rounded-[30px] p-5 md:p-6 ${disabled ? "opacity-55" : ""}`} disabled={disabled}>
+    <fieldset className={`panel-surface p-4 md:p-5 ${disabled ? "opacity-60" : ""} ${className ?? ""}`} disabled={disabled}>
       <p className="eyebrow">{title}</p>
-      <p className="mt-2 text-sm leading-6 text-[color:var(--ink-muted)]">{description}</p>
-      <div className="mt-5">{children}</div>
+      <p className="mt-1.5 text-sm leading-6 text-[color:var(--ink-muted)]">{description}</p>
+      <div className="mt-4">{children}</div>
     </fieldset>
   );
 }
@@ -1073,7 +1083,7 @@ function LabelRow({ label, tooltip, value }: LabelRowProps) {
         <span className="text-sm font-semibold text-[color:var(--ink)]">{label}</span>
         <Tooltip content={tooltip} />
       </div>
-      {value && <span className="text-sm font-semibold text-[color:var(--ink-muted)]">{value}</span>}
+      {value && <span className="mono text-sm font-semibold text-[color:var(--ink-muted)]">{value}</span>}
     </div>
   );
 }
@@ -1083,18 +1093,27 @@ type FieldShellProps = {
   tooltip: string;
   valueText?: string;
   warning?: string | null;
+  className?: string;
   children: ReactNode;
 };
 
-function FieldShell({ label, tooltip, valueText, warning, children }: FieldShellProps) {
+function FieldShell({ label, tooltip, valueText, warning, className, children }: FieldShellProps) {
   return (
-    <div className="panel-soft">
+    <div className={`panel-soft ${className ?? ""}`}>
       <LabelRow label={label} tooltip={tooltip} value={valueText} />
-      <div className="mt-3">{children}</div>
-      {warning && <p className="mt-3 text-sm leading-6 text-amber-700">{warning}</p>}
+      <div className="mt-2.5">{children}</div>
+      {warning && <p className="mt-2.5 text-xs leading-5 text-amber-700">{warning}</p>}
     </div>
   );
 }
+
+const UNIT_SUFFIX: Record<NonNullable<ParameterSpec["unit"]>, string> = {
+  agents: "fish",
+  seconds: "s",
+  pixels: "px",
+  fps: "fps",
+  seed: "",
+};
 
 type ParameterSliderProps = {
   spec: ParameterSpec;
@@ -1107,28 +1126,52 @@ function ParameterSlider({ spec, value, disabled, onChange }: ParameterSliderPro
   const warning = getParameterWarning(spec, value);
   const safeStart = ((spec.recommended[0] - spec.min) / (spec.max - spec.min)) * 100;
   const safeEnd = ((spec.recommended[1] - spec.min) / (spec.max - spec.min)) * 100;
+  const precision = spec.precision ?? (spec.step >= 1 ? 0 : 2);
+  const unitSuffix = spec.unit ? UNIT_SUFFIX[spec.unit] : "";
+
+  const commit = (raw: number) => {
+    if (!Number.isFinite(raw)) {
+      return;
+    }
+    onChange(Math.min(spec.max, Math.max(spec.min, raw)));
+  };
 
   return (
-    <FieldShell label={spec.label} tooltip={spec.tooltip} valueText={formatParameterValue(spec, value)} warning={warning}>
-      <div className="range-shell">
-        <div className="range-track">
-          <div className="range-safe-window" style={{ left: `${safeStart}%`, width: `${Math.max(0, safeEnd - safeStart)}%` }} />
+    <FieldShell label={spec.label} tooltip={spec.tooltip} warning={warning}>
+      <div className="flex items-center gap-3">
+        <div className="range-shell min-w-0 flex-1">
+          <div className="range-track">
+            <div className="range-safe-window" style={{ left: `${safeStart}%`, width: `${Math.max(0, safeEnd - safeStart)}%` }} />
+          </div>
+          <input
+            className="slider-control"
+            disabled={disabled}
+            max={spec.max}
+            min={spec.min}
+            step={spec.step}
+            type="range"
+            value={value}
+            onChange={(event) => onChange(Number(event.target.value))}
+          />
         </div>
-        <input
-          className="slider-control"
-          disabled={disabled}
-          max={spec.max}
-          min={spec.min}
-          step={spec.step}
-          type="range"
-          value={value}
-          onChange={(event) => onChange(Number(event.target.value))}
-        />
+        <div className="flex items-center gap-1.5">
+          <input
+            className="value-input"
+            disabled={disabled}
+            max={spec.max}
+            min={spec.min}
+            step={spec.step}
+            type="number"
+            value={Number(value.toFixed(precision))}
+            onChange={(event) => commit(Number(event.target.value))}
+          />
+          {unitSuffix && <span className="w-7 text-xs text-[color:var(--ink-faint)]">{unitSuffix}</span>}
+        </div>
       </div>
-      <div className="mt-3 flex items-center justify-between gap-3 text-xs uppercase tracking-[0.18em] text-[color:var(--ink-faint)]">
+      <div className="mono mt-2.5 flex items-center justify-between gap-3 text-[11px] text-[color:var(--ink-faint)]">
         <span>{formatParameterValue(spec, spec.min)}</span>
         <span>
-          Recommended {formatParameterValue(spec, spec.recommended[0])} to {formatParameterValue(spec, spec.recommended[1])}
+          Rec. {formatParameterValue(spec, spec.recommended[0])}–{formatParameterValue(spec, spec.recommended[1])}
         </span>
         <span>{formatParameterValue(spec, spec.max)}</span>
       </div>
@@ -1142,12 +1185,13 @@ type SelectFieldProps = {
   value: string;
   options: string[];
   disabled: boolean;
+  className?: string;
   onChange: (value: string) => void;
 };
 
-function SelectField({ label, tooltip, value, options, disabled, onChange }: SelectFieldProps) {
+function SelectField({ label, tooltip, value, options, disabled, className, onChange }: SelectFieldProps) {
   return (
-    <FieldShell label={label} tooltip={tooltip}>
+    <FieldShell className={className} label={label} tooltip={tooltip}>
       <select className="input-control" disabled={disabled} value={value} onChange={(event) => onChange(event.target.value)}>
         {options.map((option) => (
           <option key={option} value={option}>
@@ -1164,12 +1208,13 @@ type TextFieldProps = {
   tooltip: string;
   value: string;
   disabled: boolean;
+  className?: string;
   onChange: (value: string) => void;
 };
 
-function TextField({ label, tooltip, value, disabled, onChange }: TextFieldProps) {
+function TextField({ label, tooltip, value, disabled, className, onChange }: TextFieldProps) {
   return (
-    <FieldShell label={label} tooltip={tooltip}>
+    <FieldShell className={className} label={label} tooltip={tooltip}>
       <input className="input-control" disabled={disabled} type="text" value={value} onChange={(event) => onChange(event.target.value)} />
     </FieldShell>
   );
@@ -1185,7 +1230,7 @@ type ToggleControlProps = {
 
 function ToggleControl({ label, tooltip, checked, disabled, onChange }: ToggleControlProps) {
   return (
-    <div className="flex items-center justify-between gap-3 rounded-[22px] border border-[color:var(--line-strong)] bg-white/72 px-4 py-3">
+    <div className="flex items-center justify-between gap-3 rounded-lg border border-[color:var(--line)] bg-white px-3 py-2.5">
       <div className="flex items-center gap-2">
         <span className="text-sm font-semibold text-[color:var(--ink)]">{label}</span>
         <Tooltip content={tooltip} />
@@ -1197,7 +1242,7 @@ function ToggleControl({ label, tooltip, checked, disabled, onChange }: ToggleCo
         type="button"
         onClick={() => onChange(!checked)}
       >
-        <span className={`toggle-knob ${checked ? "translate-x-6" : ""}`} />
+        <span className="toggle-knob" />
       </button>
     </div>
   );
@@ -1218,22 +1263,34 @@ function SplitBalanceField({ totalAgents, leftCount, rightCount, disabled, onCha
       tooltip="Controls the exact number of fish assigned to the left branch. The right branch updates automatically so the total always stays valid."
       valueText={`${leftCount} left / ${rightCount} right`}
     >
-      <div className="range-shell">
-        <div className="range-track">
-          <div className="range-safe-window" style={{ left: "28%", width: "44%" }} />
+      <div className="flex items-center gap-3">
+        <div className="range-shell min-w-0 flex-1">
+          <div className="range-track">
+            <div className="range-safe-window" style={{ left: "28%", width: "44%" }} />
+          </div>
+          <input
+            className="slider-control"
+            disabled={disabled}
+            max={totalAgents}
+            min={0}
+            step={1}
+            type="range"
+            value={leftCount}
+            onChange={(event) => onChange(Number(event.target.value))}
+          />
         </div>
         <input
-          className="slider-control"
+          className="value-input"
           disabled={disabled}
           max={totalAgents}
           min={0}
           step={1}
-          type="range"
+          type="number"
           value={leftCount}
           onChange={(event) => onChange(Number(event.target.value))}
         />
       </div>
-      <div className="mt-4 grid grid-cols-2 gap-3">
+      <div className="mt-3 grid grid-cols-2 gap-2.5">
         <PreviewMetric label="Left branch" value={`${leftCount} fish`} />
         <PreviewMetric label="Right branch" value={`${rightCount} fish`} />
       </div>
@@ -1272,18 +1329,18 @@ function PhaseScheduleCard({
         label="Phase Schedule"
         tooltip="Choose the exact timestamps for when aggregation ends, when splitting begins, and when the video ends."
       />
-      <div className="schedule-track mt-4">
+      <div className="schedule-track mt-3">
         <div className="schedule-segment schedule-aggregation" style={{ width: aggregationWidth }}>
           Aggregation
         </div>
         <div className="schedule-segment schedule-stabilization" style={{ width: stabilizationWidth }}>
-          Stabilization
+          Stabilize
         </div>
         <div className="schedule-segment schedule-split" style={{ width: splitWidth }}>
           Split
         </div>
       </div>
-      <div className="mt-3 grid gap-3 md:grid-cols-3">
+      <div className="mt-3 grid gap-2.5 md:grid-cols-3">
         <ScheduleInput
           disabled={disabled}
           label="Aggregation Ends"
@@ -1303,16 +1360,9 @@ function PhaseScheduleCard({
           value={splitStart}
           onChange={onSplitStartChange}
         />
-        <ScheduleInput
-          disabled={disabled}
-          label="Video Ends"
-          max={180}
-          min={60}
-          value={videoEnd}
-          onChange={onVideoEndChange}
-        />
+        <ScheduleInput disabled={disabled} label="Video Ends" max={180} min={60} value={videoEnd} onChange={onVideoEndChange} />
       </div>
-      <div className="mt-4 grid gap-3 md:grid-cols-3">
+      <div className="mt-3 grid gap-2.5 md:grid-cols-3">
         <PreviewMetric label="Aggregation" value={formatClock(aggregationEnd)} />
         <PreviewMetric label="Stabilization" value={formatClock(stabilizationWindow)} />
         <PreviewMetric label="Split Observation" value={formatClock(splitWindow)} />
@@ -1332,11 +1382,11 @@ type ScheduleInputProps = {
 
 function ScheduleInput({ label, value, min, max, disabled, onChange }: ScheduleInputProps) {
   return (
-    <div className="rounded-[20px] border border-[color:var(--line)] bg-white/76 px-4 py-3">
-      <p className="text-[11px] uppercase tracking-[0.22em] text-[color:var(--ink-faint)]">{label}</p>
-      <div className="mt-3 flex items-center gap-3">
+    <div className="rounded-lg border border-[color:var(--line)] bg-white px-3 py-2.5">
+      <p className="text-[10px] uppercase tracking-[0.16em] text-[color:var(--ink-faint)]">{label}</p>
+      <div className="mt-2 flex items-center gap-2">
         <input
-          className="input-control"
+          className="input-control mono"
           disabled={disabled}
           max={max}
           min={min}
@@ -1373,11 +1423,11 @@ function CoordinateGrid({ config, disabled, onChange }: CoordinateGridProps) {
   ];
 
   return (
-    <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+    <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
       {fields.map((field) => (
         <FieldShell key={field.key} label={field.label} tooltip={field.tooltip} valueText={`${Math.round(Number(config[field.key]))}px`}>
           <input
-            className="input-control"
+            className="input-control mono"
             disabled={disabled}
             min={0}
             step={1}
@@ -1399,8 +1449,8 @@ type PreviewMetricProps = {
 function PreviewMetric({ label, value }: PreviewMetricProps) {
   return (
     <div className="metric-card">
-      <p className="text-[11px] uppercase tracking-[0.22em] text-[color:var(--ink-faint)]">{label}</p>
-      <p className="mt-2 text-lg font-semibold text-[color:var(--ink)]">{value}</p>
+      <p className="text-[10px] uppercase tracking-[0.16em] text-[color:var(--ink-faint)]">{label}</p>
+      <p className="mono mt-1.5 text-base font-semibold text-[color:var(--ink)]">{value}</p>
     </div>
   );
 }
@@ -1415,13 +1465,9 @@ type PresetButtonProps = {
 
 function PresetButton({ label, description, active, disabled, onClick }: PresetButtonProps) {
   return (
-    <button
-      className={`preset-card ${active ? "preset-card-active" : ""}`}
-      disabled={disabled}
-      onClick={onClick}
-    >
+    <button className={`preset-card ${active ? "preset-card-active" : ""}`} disabled={disabled} onClick={onClick}>
       <p className="text-left text-sm font-semibold text-[color:var(--ink)]">{label}</p>
-      <p className="mt-2 text-left text-sm leading-6 text-[color:var(--ink-muted)]">{description}</p>
+      <p className="mt-1 text-left text-xs leading-5 text-[color:var(--ink-muted)]">{description}</p>
     </button>
   );
 }
@@ -1433,9 +1479,9 @@ type StatTileProps = {
 
 function StatTile({ label, value }: StatTileProps) {
   return (
-    <div className="rounded-2xl bg-white/8 px-3 py-3">
-      <p className="text-[11px] uppercase tracking-[0.22em] text-white/45">{label}</p>
-      <p className="mt-2 text-sm font-semibold text-white">{value}</p>
+    <div className="rounded-lg bg-white/[0.06] px-3 py-2.5">
+      <p className="text-[10px] uppercase tracking-[0.16em] text-white/45">{label}</p>
+      <p className="mono mt-1.5 text-sm font-semibold text-white">{value}</p>
     </div>
   );
 }

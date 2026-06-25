@@ -13,10 +13,8 @@ module.exports = {
         },
       },
       fontFamily: {
-        sans: ['"SF Pro Display"', '"Helvetica Neue"', '"Segoe UI"', "sans-serif"],
-      },
-      boxShadow: {
-        panel: "0 18px 42px rgba(20, 35, 60, 0.08)",
+        sans: ['"Inter Variable"', "system-ui", '"Segoe UI"', "sans-serif"],
+        mono: ['"JetBrains Mono Variable"', "ui-monospace", "Consolas", "monospace"],
       },
     },
   },

@@ -16,7 +16,8 @@ function Tooltip({ content }: TooltipProps) {
     >
       <button
         aria-describedby={open ? tooltipId : undefined}
-        className="inline-flex h-5 w-5 items-center justify-center rounded-full border border-[color:var(--line-strong)] bg-white/80 text-[10px] font-semibold text-[color:var(--ink-muted)] transition hover:border-[color:var(--accent)] hover:text-[color:var(--accent)] focus:outline-none focus:ring-2 focus:ring-[color:var(--accent-soft)]"
+        aria-label="More information"
+        className="inline-flex h-4 w-4 items-center justify-center rounded-full border border-[color:var(--line-strong)] bg-white text-[10px] font-semibold text-[color:var(--ink-faint)] transition hover:border-[color:var(--accent)] hover:text-[color:var(--accent)] focus:outline-none focus:ring-2 focus:ring-[color:var(--accent-soft)]"
         type="button"
         onBlur={() => setOpen(false)}
         onClick={() => setOpen((current) => !current)}
@@ -28,7 +29,7 @@ function Tooltip({ content }: TooltipProps) {
         <span
           id={tooltipId}
           role="tooltip"
-          className="absolute right-0 top-7 z-20 w-64 rounded-2xl border border-[color:var(--line-strong)] bg-[color:var(--panel-strong)] px-3 py-3 text-xs font-medium leading-5 text-[color:var(--ink)] shadow-[0_18px_48px_rgba(15,33,46,0.18)] backdrop-blur"
+          className="absolute right-0 top-6 z-40 w-60 rounded-lg border border-[color:var(--line-strong)] bg-white px-3 py-2 text-xs font-medium leading-5 text-[color:var(--ink-muted)] shadow-[0_4px_16px_rgba(15,27,45,0.12)]"
         >
           {content}
         </span>

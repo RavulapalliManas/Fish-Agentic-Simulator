@@ -1,0 +1,43 @@
+{
+  "name": "looming_on_grating",
+  "seed": 7,
+  "geometry": {
+    "viewing_distance_mm": 30.0,
+    "screen_w_mm": 68.0,
+    "screen_h_mm": 38.0,
+    "screen_w_px": 1280,
+    "screen_h_px": 720,
+    "refresh_hz": 60.0,
+    "gamma": 2.2,
+    "projection": "planar",
+    "display_id": "bench-demo"
+  },
+  "render": {
+    "fps": 60,
+    "duration_s": 2.0,
+    "bit_depth": 8,
+    "gamma_policy": "encode_into_file",
+    "sync_marker": true,
+    "codec": "png_sequence",
+    "mean_lum": 0.5
+  },
+  "scene": [
+    {
+      "type": "grating",
+      "spatial_freq_cpd": 0.06,
+      "temporal_freq_hz": 1.5,
+      "contrast": 0.7,
+      "orientation_deg": 0.0,
+      "mean_lum": 0.5
+    },
+    {
+      "type": "looming",
+      "l_over_v_s": 0.06,
+      "t_collision_s": 1.9,
+      "max_radius_deg": 35.0,
+      "contrast": 1.0,
+      "polarity": "dark",
+      "center_deg": [0.0, 0.0]
+    }
+  ]
+}
