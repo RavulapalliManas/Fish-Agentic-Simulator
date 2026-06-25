@@ -12,8 +12,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .geometry import DisplayGeometry
-from .scene import Scene
+from .scene import Layer, Scene
 from .stimuli import STIMULUS_REGISTRY
+
+# Per-layer keys that wrap a primitive (region/compositing/timeline). Everything
+# else in a scene entry (besides "type") is a primitive parameter.
+LAYER_KEYS = ("region", "compositing", "onset_s", "offset_s", "fade_in_s", "fade_out_s", "blend_weight")
 
 DEFAULT_RENDER = {
     "fps": 60,
@@ -52,7 +56,9 @@ class ExperimentSpec:
                 raise ValueError(
                     f"unknown stimulus type {stimulus_type!r}; known types: {sorted(STIMULUS_REGISTRY)}"
                 )
-            layers.append(cls(**params))
+            layer_kwargs = {key: params.pop(key) for key in LAYER_KEYS if key in params}
+            stimulus = cls(**params)
+            layers.append(Layer(stimulus=stimulus, **layer_kwargs))
         return Scene(layers, mean_lum=float(self.render_settings()["mean_lum"]))
 
     def to_canonical_dict(self) -> dict:

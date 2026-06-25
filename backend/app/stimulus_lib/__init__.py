@@ -13,12 +13,14 @@ from .geometry import DisplayGeometry
 from .scene import Scene
 from .spec import ExperimentSpec, config_hash, load_spec
 from .render import render_experiment
+from .sweep import expand_sweep
 
 __all__ = [
     "DisplayGeometry",
     "ExperimentSpec",
     "Scene",
     "config_hash",
+    "expand_sweep",
     "load_spec",
     "render_experiment",
 ]

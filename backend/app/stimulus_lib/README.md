@@ -1,4 +1,4 @@
-# stimulus_lib — reproducible visual-stimulus platform (P0 + core primitives)
+# stimulus_lib — reproducible zebrafish visual-stimulus platform
 
 Degrees-of-visual-angle, config-as-code stimulus generator. Renders **deterministic,
 lossless** frame sequences with a **provenance manifest**, a **baked per-frame sync
@@ -9,65 +9,85 @@ marker**, and **stimulus-level Nyquist validation**. The shoaling app elsewhere 
 
 ```bash
 # from the backend/ directory
-python -m app.stimulus_lib.cli render app/stimulus_lib/examples/grating_omr.json --out output/stimuli/grating_omr
+python -m app.stimulus_lib.cli list-tasks
+python -m app.stimulus_lib.cli make-task split_field_omr --param condition=conflict --param duration_s=10
+python -m app.stimulus_lib.cli render app/stimulus_lib/examples/split_field_omr_conflict.json --out output/stimuli/demo
 ```
 
-Outputs into the `--out` directory:
-- `frames/frame_000000.png …` — lossless PNG sequence (or a single `.mkv` with `codec: "ffv1"`)
-- `<name>.manifest.json` — provenance: config hash, git commit, geometry, resolved params,
-  gamma policy, codec, fps, seed, sync-marker encoding, and the round-trip QA result.
+Outputs into `--out`: a lossless PNG sequence (`frames/`) or a single `.mkv` (`codec: ffv1`),
+plus `<name>.manifest.json` (config hash, git commit, geometry, resolved layers/regions, gamma
+policy, codec, fps, seed, sync-marker encoding, round-trip QA).
 
-## Spec format (JSON or YAML)
+## Architecture: split falls out of masking
+
+A scene is a list of **layers**; each layer = a **primitive** placed in a **region**, with a
+**compositing** rule and a **timeline**. There is no per-paradigm render code — split-field,
+monocular, conflict, prey-on-background, and surround stimuli are all layer/region combinations.
 
 ```jsonc
-{
-  "name": "grating_omr",
-  "seed": 1234,
-  "geometry": { "viewing_distance_mm": 30, "screen_w_mm": 68, "screen_h_mm": 38,
-                "screen_w_px": 1280, "screen_h_px": 720, "refresh_hz": 60, "gamma": 2.2,
-                "projection": "planar", "display_id": "bench-demo" },
-  "render":   { "fps": 60, "duration_s": 2.0, "bit_depth": 8,
-                "gamma_policy": "encode_into_file", "sync_marker": true,
-                "codec": "png_sequence", "mean_lum": 0.5 },
-  "scene":    [ { "type": "grating", "spatial_freq_cpd": 0.08, "temporal_freq_hz": 2.0,
-                  "contrast": 0.9, "orientation_deg": 90 } ]
-}
+"scene": [
+  { "type": "grating", "region": "left",  "spatial_freq_cpd": 0.08, "temporal_freq_hz":  2.0 },
+  { "type": "grating", "region": "right", "spatial_freq_cpd": 0.08, "temporal_freq_hz": -2.0 }
+]   // <- split-field OMR conflict. No "split" primitive exists.
 ```
 
-All spatial parameters are in **degrees of visual angle** (cycles/deg, deg/s); they are
-converted to pixels against `geometry`. Layers in `scene` superpose (e.g. a looming disc
-over a drifting grating — see `examples/looming_on_grating.json`).
+- **Regions** (in degrees): `full`, `left`, `right`, `top`, `bottom`, `quadrant`, `circle`,
+  `annulus`, `rect` (+ `invert`, `boundary_deg`, `center_deg`, …).
+- **Compositing**: `over` (default), `blend` (weighted, for transparency/conflict), `occlude` (hard).
+- **Timeline**: `onset_s`, `offset_s`, `fade_in_s`, `fade_out_s` per layer.
 
-## Primitives (P1 core)
+All optional — a bare `{"type": ...}` entry is full-field, `over`, always-on.
+
+## Primitives
 
 | type | key params |
 |---|---|
-| `grating` | `spatial_freq_cpd`, `temporal_freq_hz`, `contrast`, `orientation_deg`, `phase_deg`, `mean_lum` |
-| `looming` | `l_over_v_s`, `t_collision_s`, `max_radius_deg`, `contrast`, `polarity`, `center_deg` |
-| `rdk` | `n_dots`, `coherence`, `speed_dps`, `direction_deg`, `dot_size_deg`, `dot_lifetime_s` |
-| `dark_flash` | `baseline_lum`, `flash_lum`, `onset_s`, `duration_s` |
-| `bar` | `width_deg`, `speed_dps`, `direction_deg`, `contrast`, `polarity` |
+| `grating` | spatial_freq_cpd, temporal_freq_hz / velocity_dps, contrast, direction_deg, waveform |
+| `okr` | spatial_freq_cpd, angular_velocity_dps, contrast, center_deg, waveform |
+| `checkerboard` | check_size_deg, contrast, reversal_hz |
+| `rdk` | n_dots, coherence, speed_dps, direction_deg, dot_size_deg, dot_lifetime_s |
+| `looming` | l_over_v_s, t_collision_s, max_radius_deg, contrast, polarity, center_deg |
+| `dark_flash` | baseline_lum, flash_lum, onset_s, duration_s |
+| `prey` | size_deg, speed_dps, trajectory (linear/brownian/saltatory), polarity |
+| `bar` | width_deg, speed_dps, direction_deg, contrast, polarity |
+| `gradient` | profile (linear/radial/sigmoid), axis_deg, low_lum, high_lum, center_deg, width_deg |
+| `conspecific` | n_agents, body_size_deg, tail_beat_hz, bout_period_s, bout_duty, speed_dps, schooling — *first-pass kinematic model* |
 
-## Defaults chosen (configurable in every spec)
+## Tasks (paradigm catalog — "choose what to generate")
 
-- **Geometry**: a generic small planar rig (30 mm distance, 68×38 mm / 1280×720, 60 Hz, γ=2.2).
-  Replace with your measured display. Curved-dish / below-projection is **not** supported yet.
-- **gamma_policy** `encode_into_file` (frames are display-ready for γ=2.2). Use
-  `linear_record_only` to store linear and let the rig correct at playback.
-- **codec** `png_sequence` (lossless, round-trip verified). `ffv1` writes a single lossless MKV.
+`list-tasks` returns each task's tunable parameters (defaults / ranges / choices) so a CLI or UI
+can present them. `make-task <name> [--param k=v ...]` builds and renders it. Tasks: `omr`, `okr`,
+`rdk`, `split_field_omr` {congruent/conflict/monocular_left/monocular_right}, `looming`,
+`dark_flash`, `prey`, `moving_bar`, `static_grating`, `checkerboard`, `light_dark_preference`
+{split/gradient}, `social`.
 
-## Validation (correctness gates, not style)
+## Batch sweep + counterbalancing
 
-`render_experiment` refuses to render if a layer violates Nyquist:
-- spatial frequency finer than the display resolves (> 0.5 cyc/px),
-- grating motion ≥ 0.5 cycle/frame (aliasing / reverse-phi),
-- RDK coherent step larger than a dot per frame.
+```python
+from stimulus_lib import expand_sweep
+design = expand_sweep(base_spec,
+    axes=[{"path": "scene.0.contrast", "values": [0.2, 0.5, 0.8]},
+          {"path": "scene.0.temporal_freq_hz", "values": [1, 2, 4]}],
+    presentation_seed=7)
+# -> full-factorial conditions (each config-hashed) + a presentation_order randomized on a
+#    SEPARATE seed, independent of generation order.
+```
 
-A non-fatal warning is recorded if `fps` is not an integer multiple/divisor of the refresh rate.
+## Validation (correctness gates)
 
-## Deferred (next phases — see roadmap)
+Render is refused if a layer violates Nyquist: spatial frequency past 0.5 cyc/px; grating/OKR/
+checkerboard temporal motion ≥ 0.5 cycle/frame (reverse-phi); RDK/prey step larger than a dot per
+frame; conspecific tail-beat ≥ 0.5·fps. A non-fatal warning is recorded if `fps` is not an integer
+multiple/divisor of the display refresh.
 
-- **P2** batch generation + counterbalancing (presentation order randomized separately).
-- **P3** active/Bayesian psychophysics — pending the rig's behavior-signal protocol.
-- Conspecific primitive as an eye-view stimulus (the shoaling renderer is top-down).
-- Frontend integration of the new primitives into the inspector UI.
+## Defaults (configurable in every spec)
+
+Generic planar rig (30 mm, 68×38 mm / 1280×720, 60 Hz, γ=2.2); `gamma_policy` `encode_into_file`;
+`codec` `png_sequence` (lossless, round-trip verified). Replace geometry with your measured display.
+Curved-dish / below-projection is not supported yet.
+
+## Deferred (see roadmap)
+
+Measured luminance/gamma LUT + projector warp; photodiode/TTL timing decode + QA report;
+closed-loop real-time presenter; active/Bayesian (QUEST/Ψ) adaptive selection over the sweep grid;
+frontend task picker + session builder; standardized events/data export (BIDS/NWB).

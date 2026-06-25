@@ -13,6 +13,9 @@ APP_DIR = Path(__file__).resolve().parents[1] / "app"
 if str(APP_DIR) not in sys.path:
     sys.path.insert(0, str(APP_DIR))
 
+import cv2  # noqa: E402
+import numpy as np  # noqa: E402
+
 from stimulus_lib import DisplayGeometry, ExperimentSpec, config_hash, render_experiment  # noqa: E402
 from stimulus_lib.spec import load_spec  # noqa: E402
 
@@ -76,7 +79,9 @@ def test_manifest_provenance(tmp_path):
     assert manifest["config_hash"] == config_hash(spec)
     assert "git_commit" in manifest
     assert manifest["geometry"]["px_per_deg"] > 0
-    assert [layer["type"] for layer in manifest["scene"]] == ["grating", "rdk"]
+    assert [layer["stimulus"]["type"] for layer in manifest["scene"]] == ["grating", "rdk"]
+    assert manifest["scene"][0]["region"] == "full"
+    assert manifest["scene"][0]["compositing"] == "over"
     assert manifest["sync_marker"]["n_bits"] == 12
 
 
@@ -86,7 +91,84 @@ def test_examples_load_and_render(tmp_path):
     result = render_experiment(spec, tmp_path / "ex")
     assert result["n_frames"] == 6
     assert result["manifest"]["qa"]["lossless_verified"] is True
-    assert [layer["type"] for layer in result["manifest"]["scene"]] == ["grating", "looming"]
+    assert [layer["stimulus"]["type"] for layer in result["manifest"]["scene"]] == ["grating", "looming"]
+
+
+def test_region_masking_confines(tmp_path):
+    """A grating masked to the left hemifield leaves the right hemifield at mean luminance."""
+    spec = ExperimentSpec(
+        name="region",
+        seed=1,
+        geometry={"screen_w_px": 200, "screen_h_px": 120},
+        render={
+            "fps": 30,
+            "duration_s": 0.05,
+            "codec": "png_sequence",
+            "sync_marker": False,
+            "gamma_policy": "linear_record_only",
+        },
+        scene=[{"type": "grating", "spatial_freq_cpd": 0.1, "temporal_freq_hz": 1.0, "contrast": 0.9, "region": "left"}],
+    )
+    render_experiment(spec, tmp_path / "r", created_utc="2026-01-01T00:00:00+00:00")
+    frame = cv2.imread(str(tmp_path / "r" / "frames" / "frame_000000.png"), cv2.IMREAD_UNCHANGED)
+    channel = frame[:, :, 0].astype(np.float64)
+    width = channel.shape[1]
+    left = channel[:, : width // 2 - 5]
+    right = channel[:, width // 2 + 5 :]
+    assert left.std() > 10.0, "masked-in (left) hemifield should carry the grating"
+    assert right.std() < 1.0, "masked-out (right) hemifield should stay at mean luminance"
+
+
+def test_split_field_is_pure_composition(tmp_path):
+    """Split-field = two masked gratings drifting oppositely. No dedicated split type/code."""
+    spec = ExperimentSpec(
+        name="split",
+        seed=2,
+        geometry={"screen_w_px": 200, "screen_h_px": 120},
+        render={"fps": 30, "duration_s": 0.05, "codec": "png_sequence", "sync_marker": False},
+        scene=[
+            {"type": "grating", "spatial_freq_cpd": 0.1, "temporal_freq_hz": 2.0, "contrast": 0.9, "direction_deg": 0, "region": "left"},
+            {"type": "grating", "spatial_freq_cpd": 0.1, "temporal_freq_hz": -2.0, "contrast": 0.9, "direction_deg": 0, "region": "right"},
+        ],
+    )
+    result = render_experiment(spec, tmp_path / "s")
+    scene = result["manifest"]["scene"]
+    assert [layer["stimulus"]["type"] for layer in scene] == ["grating", "grating"]
+    assert [layer["region"] for layer in scene] == ["left", "right"]
+    assert result["manifest"]["qa"]["lossless_verified"] is True
+
+
+def test_registry_has_full_repertoire():
+    from stimulus_lib.stimuli import STIMULUS_REGISTRY
+
+    expected = {"grating", "looming", "rdk", "dark_flash", "bar", "okr", "checkerboard", "prey", "gradient", "conspecific"}
+    assert expected <= set(STIMULUS_REGISTRY), set(STIMULUS_REGISTRY)
+
+
+def test_task_catalog_builds_and_renders(tmp_path):
+    from stimulus_lib.tasks import build_task, list_tasks
+
+    assert len(list_tasks()) >= 12
+    spec = build_task("split_field_omr", condition="conflict", duration_s=0.1)
+    result = render_experiment(spec, tmp_path / "task", created_utc="2026-01-01T00:00:00+00:00")
+    assert result["manifest"]["qa"]["lossless_verified"] is True
+    assert [layer["region"] for layer in result["manifest"]["scene"]] == ["left", "right"]
+
+
+def test_sweep_full_factorial_separate_seed():
+    from stimulus_lib import expand_sweep
+
+    base = ExperimentSpec(
+        name="b", seed=0, geometry={"screen_w_px": 320, "screen_h_px": 200},
+        render={"fps": 60, "duration_s": 0.1},
+        scene=[{"type": "grating", "spatial_freq_cpd": 0.1, "temporal_freq_hz": 2.0, "contrast": 0.8}],
+    )
+    axes = [{"path": "scene.0.contrast", "values": [0.2, 0.8]}, {"path": "render.fps", "values": [30, 60]}]
+    sweep = expand_sweep(base, axes, presentation_seed=7)
+    assert sweep["n_conditions"] == 4 and len(sweep["specs"]) == 4
+    assert len({c["config_hash"] for c in sweep["conditions"]}) == 4
+    assert sorted(sweep["presentation_order"]) == [0, 1, 2, 3]
+    assert expand_sweep(base, axes, presentation_seed=7)["presentation_order"] == sweep["presentation_order"]
 
 
 if __name__ == "__main__":
@@ -99,4 +181,9 @@ if __name__ == "__main__":
         test_nyquist_spatial_rejected(base / "nyq")
         test_manifest_provenance(base / "prov")
         test_examples_load_and_render(base / "examples")
+        test_region_masking_confines(base / "region")
+        test_split_field_is_pure_composition(base / "split")
+        test_registry_has_full_repertoire()
+        test_task_catalog_builds_and_renders(base / "task")
+        test_sweep_full_factorial_separate_seed()
     print("all stimulus_lib checks passed")
