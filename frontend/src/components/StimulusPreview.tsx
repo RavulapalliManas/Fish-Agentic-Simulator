@@ -229,7 +229,8 @@ function StimulusPreview({
 
       <div className="pointer-events-none absolute left-3 top-3">
         <span className="preview-badge">
-          {designMode ? "Layout editing — playback paused" : playbackEnabled ? "Looping preview" : "Preview held"}
+          {!designMode && playbackEnabled && <span className="pulse-dot" />}
+          {designMode ? "Layout editing, paused" : playbackEnabled ? "Looping preview" : "Preview held"}
         </span>
       </div>
 

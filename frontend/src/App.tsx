@@ -225,7 +225,7 @@ function App() {
   }, [backendReady, deferredConfig, designMode, previewNonce, previewPhase, runtime]);
 
   const previewMetrics = useMemo(
-    () => [
+    (): Array<{ label: string; value: string; tone?: "accent" | "warm" }> => [
       { label: "Preview phase", value: humanizePhase(preview?.phase ?? previewPhase) },
       { label: "Preview fish", value: preview ? `${preview.preview_agent_count}` : "--" },
       {
@@ -239,10 +239,12 @@ function App() {
       {
         label: "Left branch",
         value: `${config.left_count}`,
+        tone: "accent",
       },
       {
         label: "Right branch",
         value: `${config.right_count}`,
+        tone: "warm",
       },
     ],
     [config.left_count, config.right_count, preview, previewPhase],
@@ -775,7 +777,7 @@ function App() {
                 </div>
 
                 <div className="panel-soft">
-                  <LabelRow label="Layout preset" tooltip="Applies a reproducible attractor arrangement. Changes geometry only — not the seed or split counts." />
+                  <LabelRow label="Layout preset" tooltip="Applies a reproducible attractor arrangement. Changes geometry only, not the seed or split counts." />
                   <select
                     className="input-control mt-2.5"
                     disabled={!backendReady || busy}
@@ -816,7 +818,7 @@ function App() {
 
             <div className="mt-4 grid gap-2.5 sm:grid-cols-3 xl:grid-cols-6">
               {previewMetrics.map((metric) => (
-                <PreviewMetric key={metric.label} label={metric.label} value={metric.value} />
+                <PreviewMetric key={metric.label} label={metric.label} value={metric.value} tone={metric.tone} />
               ))}
             </div>
           </div>
@@ -1291,8 +1293,8 @@ function SplitBalanceField({ totalAgents, leftCount, rightCount, disabled, onCha
         />
       </div>
       <div className="mt-3 grid grid-cols-2 gap-2.5">
-        <PreviewMetric label="Left branch" value={`${leftCount} fish`} />
-        <PreviewMetric label="Right branch" value={`${rightCount} fish`} />
+        <PreviewMetric label="Left branch" value={`${leftCount} fish`} tone="accent" />
+        <PreviewMetric label="Right branch" value={`${rightCount} fish`} tone="warm" />
       </div>
     </FieldShell>
   );
@@ -1444,13 +1446,20 @@ function CoordinateGrid({ config, disabled, onChange }: CoordinateGridProps) {
 type PreviewMetricProps = {
   label: string;
   value: string;
+  tone?: "accent" | "warm";
 };
 
-function PreviewMetric({ label, value }: PreviewMetricProps) {
+function PreviewMetric({ label, value, tone }: PreviewMetricProps) {
+  const valueColor =
+    tone === "accent"
+      ? "text-[color:var(--accent-strong)]"
+      : tone === "warm"
+        ? "text-[color:var(--warm-strong)]"
+        : "text-[color:var(--ink)]";
   return (
     <div className="metric-card">
       <p className="text-[10px] uppercase tracking-[0.16em] text-[color:var(--ink-faint)]">{label}</p>
-      <p className="mono mt-1.5 text-base font-semibold text-[color:var(--ink)]">{value}</p>
+      <p className={`mono mt-1.5 text-base font-semibold ${valueColor}`}>{value}</p>
     </div>
   );
 }

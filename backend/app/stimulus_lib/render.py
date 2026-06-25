@@ -95,6 +95,15 @@ def render_experiment(spec: ExperimentSpec, out_dir: str | Path, created_utc: st
     use_sync = bool(settings["sync_marker"])
     n_frames = max(1, int(round(duration * fps)))
 
+    calibration = None
+    if gamma_policy == "measured_lut":
+        from .calibration import Calibration
+
+        cal_path = settings.get("calibration_file")
+        if not cal_path:
+            raise ValueError("gamma_policy 'measured_lut' requires render.calibration_file")
+        calibration = Calibration.load(cal_path)
+
     scene = spec.build_scene()
 
     errors = scene.validate(geometry, fps)
@@ -139,6 +148,8 @@ def render_experiment(spec: ExperimentSpec, out_dir: str | Path, created_utc: st
             display = _gamma_encode(composite, geometry.gamma)
         elif gamma_policy == "linear_record_only":
             display = composite
+        elif gamma_policy == "measured_lut":
+            display = calibration.linearize(composite)
         else:
             raise ValueError(f"unknown gamma_policy {gamma_policy!r}")
 
@@ -171,6 +182,7 @@ def render_experiment(spec: ExperimentSpec, out_dir: str | Path, created_utc: st
     manifest = {
         "generator": "fish-stimulus-platform",
         "config_hash": config_hash(spec),
+        "spec": spec.to_canonical_dict(),
         "git_commit": _git_commit(),
         "created_utc": created_utc or datetime.now(timezone.utc).isoformat(),
         "name": spec.name,
@@ -180,6 +192,7 @@ def render_experiment(spec: ExperimentSpec, out_dir: str | Path, created_utc: st
         "duration_s": duration,
         "bit_depth": bit_depth,
         "gamma_policy": gamma_policy,
+        "calibration": calibration.manifest_record() if calibration is not None else None,
         "codec": codec,
         "geometry": geometry.to_dict(),
         "render": settings,

@@ -86,8 +86,35 @@ Generic planar rig (30 mm, 68×38 mm / 1280×720, 60 Hz, γ=2.2); `gamma_policy`
 `codec` `png_sequence` (lossless, round-trip verified). Replace geometry with your measured display.
 Curved-dish / below-projection is not supported yet.
 
+## Reproducibility & QA tooling
+
+```bash
+python -m app.stimulus_lib.cli calibration-ramp                       # levels to display for measurement
+python -m app.stimulus_lib.cli calibrate meas.csv --out cal.json --display-id rig-A
+python -m app.stimulus_lib.cli qa            output/stimuli/demo      # -> demo.qa.html
+python -m app.stimulus_lib.cli decode-timing output/stimuli/demo      # sync-marker frame timing
+python -m app.stimulus_lib.cli verify        output/stimuli/demo --write-golden golden.json
+python -m app.stimulus_lib.cli verify        output/stimuli/demo --golden golden.json
+python -m app.stimulus_lib.cli reproduce     output/stimuli/demo/demo.manifest.json --out repro
+python -m app.stimulus_lib.cli export-events  spec.json --out events.tsv
+```
+
+- **Calibration** — `gamma_policy: "measured_lut"` + `render.calibration_file` linearizes against a
+  measured luminance curve (recorded in the manifest); `Calibration.to_cd_m2()` gives physical units.
+- **Timing** — `sync_decode` recovers frame onsets from the baked marker (and a photodiode trace) and
+  flags dropped / duplicated frames.
+- **QA** — `qa` writes a self-contained HTML sheet (provenance, luminance + Michelson contrast,
+  Nyquist, lossless gate, thumbnails).
+- **Regression** — `verify` fingerprints a render; `reproduce` rebuilds from a manifest and checks
+  config-hash **and** frame-hash match (so an update can't silently change a stimulus).
+- **Events** — `export-events` / `events.sweep_events` emit a BIDS-style `events.tsv` for merging
+  with behavior / imaging data.
+
+The manifest is self-contained (authored spec + config hash + git commit + geometry + calibration),
+so any render is reproducible from its manifest alone.
+
 ## Deferred (see roadmap)
 
-Measured luminance/gamma LUT + projector warp; photodiode/TTL timing decode + QA report;
-closed-loop real-time presenter; active/Bayesian (QUEST/Ψ) adaptive selection over the sweep grid;
-frontend task picker + session builder; standardized events/data export (BIDS/NWB).
+Projector / perspective warp for curved-dish or below-projection; closed-loop real-time presenter;
+active/Bayesian (QUEST/Ψ) adaptive selection over the sweep grid; frontend task picker + session
+builder; NWB export.
